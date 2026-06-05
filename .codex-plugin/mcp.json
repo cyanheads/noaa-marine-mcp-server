@@ -1,0 +1,9 @@
+{
+  "noaa-marine-mcp-server": {
+    "command": "npx",
+    "args": ["-y", "noaa-marine-mcp-server"],
+    "env": {
+      "MCP_TRANSPORT_TYPE": "stdio"
+    }
+  }
+}
