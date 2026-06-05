@@ -6,10 +6,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { NdbcService } from '@/services/ndbc/ndbc-service.js';
 
-// NdbcService constructor accepts _config and _storage but doesn't use them at runtime.
-// Cast with `as any` to avoid needing real AppConfig / StorageService instances.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const makeService = () => new NdbcService(null as any, null as any);
+const makeService = () => new NdbcService();
 
 /** Minimal valid realtime2 header. */
 const HEADER =

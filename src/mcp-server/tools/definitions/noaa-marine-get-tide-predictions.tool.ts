@@ -136,20 +136,11 @@ export const noaaMarineGetTidePredictions = tool('noaa_marine_get_tide_predictio
 
     const svc = getCoopsService();
 
-    // CO-OPS predictions API does not return station metadata — look up from cached station list.
-    const [tideStations] = await Promise.allSettled([svc.getStations('tidepredictions', ctx)]);
-    const stationMeta =
-      tideStations.status === 'fulfilled'
-        ? tideStations.value.find((s) => s.id === input.station_id)
-        : undefined;
-
-    let result: {
-      predictions: Array<{ t: string; v: string; type?: string }>;
-      stationName: string;
-    };
-
-    try {
-      result = await svc.fetchTidePredictions(
+    // Fetch station list (for name resolution) and predictions in parallel.
+    // CO-OPS predictions API does not return station metadata — station list is best-effort.
+    const [tideStations, predResult] = await Promise.allSettled([
+      svc.getStations('tidepredictions', ctx),
+      svc.fetchTidePredictions(
         {
           station: input.station_id,
           begin_date: input.begin_date,
@@ -160,8 +151,16 @@ export const noaaMarineGetTidePredictions = tool('noaa_marine_get_tide_predictio
           interval: input.interval,
         },
         ctx,
-      );
-    } catch (err) {
+      ),
+    ]);
+
+    const stationMeta =
+      tideStations.status === 'fulfilled'
+        ? tideStations.value.find((s) => s.id === input.station_id)
+        : undefined;
+
+    if (predResult.status === 'rejected') {
+      const err = predResult.reason;
       // CO-OPS returns HTTP 400 when the station ID is invalid or wrong type.
       // fetchWithTimeout intercepts it before service-level JSON parsing — detect via statusCode.
       if (err instanceof McpError) {
@@ -176,6 +175,8 @@ export const noaaMarineGetTidePredictions = tool('noaa_marine_get_tide_predictio
       }
       throw err;
     }
+
+    const result = predResult.value;
 
     if (!result.predictions || result.predictions.length === 0) {
       throw ctx.fail(

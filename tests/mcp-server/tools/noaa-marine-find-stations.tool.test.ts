@@ -43,8 +43,7 @@ describe('noaaMarineFindStations', () => {
     const { getNdbcService } = await import('@/services/ndbc/ndbc-service.js');
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     initCoopsService(null as any, null as any, { applicationId: 'test' });
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    initNdbcService(null as any, null as any);
+    initNdbcService();
 
     const coopsSvc = getCoopsService();
     const ndbcSvc = getNdbcService();
@@ -70,8 +69,7 @@ describe('noaaMarineFindStations', () => {
     const { getNdbcService } = await import('@/services/ndbc/ndbc-service.js');
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     initCoopsService(null as any, null as any, { applicationId: 'test' });
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    initNdbcService(null as any, null as any);
+    initNdbcService();
 
     vi.spyOn(getCoopsService(), 'getStations').mockResolvedValue([]);
     vi.spyOn(getNdbcService(), 'getActiveStations').mockResolvedValue([NDBC_BUOY]);
@@ -91,8 +89,7 @@ describe('noaaMarineFindStations', () => {
     const { getNdbcService } = await import('@/services/ndbc/ndbc-service.js');
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     initCoopsService(null as any, null as any, { applicationId: 'test' });
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    initNdbcService(null as any, null as any);
+    initNdbcService();
     vi.spyOn(getCoopsService(), 'getStations').mockResolvedValue([]);
     vi.spyOn(getNdbcService(), 'getActiveStations').mockResolvedValue([]);
 
@@ -110,8 +107,7 @@ describe('noaaMarineFindStations', () => {
     const { getNdbcService } = await import('@/services/ndbc/ndbc-service.js');
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     initCoopsService(null as any, null as any, { applicationId: 'test' });
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    initNdbcService(null as any, null as any);
+    initNdbcService();
     vi.spyOn(getCoopsService(), 'getStations').mockImplementation(async (type) =>
       type === 'tidepredictions' ? [COOPS_TIDE_STATION] : [],
     );
@@ -137,8 +133,7 @@ describe('noaaMarineFindStations', () => {
     const { getNdbcService } = await import('@/services/ndbc/ndbc-service.js');
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     initCoopsService(null as any, null as any, { applicationId: 'test' });
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    initNdbcService(null as any, null as any);
+    initNdbcService();
     // Simulate current station appearing 3 times (different bins) in currentpredictions
     vi.spyOn(getCoopsService(), 'getStations').mockImplementation(async (type) => {
       if (type === 'currentpredictions') {

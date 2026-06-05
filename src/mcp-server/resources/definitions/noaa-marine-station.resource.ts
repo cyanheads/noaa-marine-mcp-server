@@ -42,34 +42,18 @@ export const noaaMarineStationResource = resource('noaa-marine://station/{statio
     // Check CO-OPS
     if (coopsResult.status === 'fulfilled') {
       const [tide, current, waterLevel] = coopsResult.value;
-      const capMap = new Map<string, string[]>();
+      const match =
+        tide.find((s) => s.id.toUpperCase() === id) ??
+        current.find((s) => s.id.toUpperCase() === id) ??
+        waterLevel.find((s) => s.id.toUpperCase() === id);
 
-      for (const s of tide) {
-        if (s.id.toUpperCase() === id) {
-          if (!capMap.has(s.id)) capMap.set(s.id, []);
-          const caps = capMap.get(s.id);
-          if (caps && !caps.includes('tide')) caps.push('tide');
-        }
-      }
-      for (const s of current) {
-        if (s.id.toUpperCase() === id) {
-          if (!capMap.has(s.id)) capMap.set(s.id, []);
-          const caps = capMap.get(s.id);
-          if (caps && !caps.includes('current')) caps.push('current');
-        }
-      }
-      for (const s of waterLevel) {
-        if (s.id.toUpperCase() === id) {
-          if (!capMap.has(s.id)) capMap.set(s.id, []);
-          const caps = capMap.get(s.id);
-          if (caps && !caps.includes('water_level')) caps.push('water_level');
-        }
-      }
-
-      const allStations = [...tide, ...current, ...waterLevel];
-      const match = allStations.find((s) => s.id.toUpperCase() === id);
       if (match) {
-        const caps = capMap.get(match.id) ?? ['tide'];
+        const caps: string[] = [];
+        if (tide.some((s) => s.id.toUpperCase() === id)) caps.push('tide');
+        if (current.some((s) => s.id.toUpperCase() === id)) caps.push('current');
+        if (waterLevel.some((s) => s.id.toUpperCase() === id)) caps.push('water_level');
+        if (caps.length === 0) caps.push('tide');
+
         const result: Record<string, unknown> = {
           station_id: match.id,
           name: match.name,

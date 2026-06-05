@@ -33,8 +33,7 @@ const NDBC_BUOY = {
 function setupServices() {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   initCoopsService(null as any, null as any, { applicationId: 'test' });
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  initNdbcService(null as any, null as any);
+  initNdbcService();
 }
 
 describe('noaaMarineStationResource', () => {

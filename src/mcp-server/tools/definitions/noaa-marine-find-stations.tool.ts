@@ -228,7 +228,7 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
     const includeCoops = input.source === 'all' || input.source === 'coops';
     const includeNdbc = input.source === 'all' || input.source === 'ndbc';
 
-    const [coopsResults] = await Promise.allSettled([
+    const [coopsResults, ndbcResult] = await Promise.allSettled([
       includeCoops
         ? Promise.all([
             coopsSvc.getStations('tidepredictions', ctx),
@@ -236,9 +236,6 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
             coopsSvc.getStations('waterlevels', ctx),
           ])
         : Promise.resolve(null),
-    ]);
-
-    const [ndbcResult] = await Promise.allSettled([
       includeNdbc ? ndbcSvc.getActiveStations(ctx) : Promise.resolve(null),
     ]);
 

@@ -38,6 +38,6 @@ await createApp({
   setup(core) {
     const serverConfig = getServerConfig();
     initCoopsService(core.config, core.storage, serverConfig);
-    initNdbcService(core.config, core.storage);
+    initNdbcService();
   },
 });

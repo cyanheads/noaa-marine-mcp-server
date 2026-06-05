@@ -4,9 +4,7 @@
  */
 
 import type { Context } from '@cyanheads/mcp-ts-core';
-import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
 import { notFound, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
-import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import { fetchWithTimeout, type RequestContext, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import type { NdbcObservation, NdbcStation } from './types.js';
 
@@ -22,9 +20,6 @@ interface StationCache {
 
 export class NdbcService {
   private stationCache: StationCache | null = null;
-
-  // AppConfig and StorageService accepted for init-pattern consistency; not used at runtime
-  constructor(_config: AppConfig, _storage: StorageService) {}
 
   /** Fetch (or return cached) NDBC active stations. */
   async getActiveStations(ctx: Context): Promise<NdbcStation[]> {
@@ -260,8 +255,8 @@ export class NdbcService {
 
 let _service: NdbcService | undefined;
 
-export function initNdbcService(config: AppConfig, storage: StorageService): void {
-  _service = new NdbcService(config, storage);
+export function initNdbcService(): void {
+  _service = new NdbcService();
 }
 
 export function getNdbcService(): NdbcService {

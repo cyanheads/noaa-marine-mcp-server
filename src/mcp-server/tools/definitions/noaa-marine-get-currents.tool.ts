@@ -135,29 +135,11 @@ export const noaaMarineGetCurrents = tool('noaa_marine_get_currents', {
 
     const svc = getCoopsService();
 
-    // CO-OPS currents_predictions API does not return station metadata — look up from cache.
-    const [currentStations] = await Promise.allSettled([
+    // Fetch station list (for name resolution) and predictions in parallel.
+    // CO-OPS currents_predictions API does not return station metadata — station list is best-effort.
+    const [currentStations, predResult] = await Promise.allSettled([
       svc.getStations('currentpredictions', ctx),
-    ]);
-    const stationMeta =
-      currentStations.status === 'fulfilled'
-        ? currentStations.value.find((s) => s.id === input.station_id)
-        : undefined;
-
-    let result: {
-      events?: Array<{
-        Time: string;
-        Type: string;
-        Velocity_Major?: string;
-        meanEbbDir?: string;
-        meanFloodDir?: string;
-      }>;
-      predictions?: Array<{ Time: string; Velocity_Major?: string; Direction?: string }>;
-      stationName: string;
-    };
-
-    try {
-      result = await svc.fetchCurrentPredictions(
+      svc.fetchCurrentPredictions(
         {
           station: input.station_id,
           begin_date: input.begin_date,
@@ -167,8 +149,16 @@ export const noaaMarineGetCurrents = tool('noaa_marine_get_currents', {
           interval: input.interval,
         },
         ctx,
-      );
-    } catch (err) {
+      ),
+    ]);
+
+    const stationMeta =
+      currentStations.status === 'fulfilled'
+        ? currentStations.value.find((s) => s.id === input.station_id)
+        : undefined;
+
+    if (predResult.status === 'rejected') {
+      const err = predResult.reason;
       // CO-OPS returns HTTP 400 for invalid station IDs — fetchWithTimeout intercepts before JSON parsing.
       if (err instanceof McpError) {
         const statusCode = (err.data as Record<string, unknown> | undefined)?.statusCode;
@@ -182,6 +172,8 @@ export const noaaMarineGetCurrents = tool('noaa_marine_get_currents', {
       }
       throw err;
     }
+
+    const result = predResult.value;
 
     if (input.interval === 'MAX_SLACK') {
       const raw = result.events ?? [];

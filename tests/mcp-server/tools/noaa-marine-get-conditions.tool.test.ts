@@ -54,8 +54,7 @@ const SPARSE_OBS = {
 };
 
 function setupNdbc() {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  initNdbcService(null as any, null as any);
+  initNdbcService();
 }
 
 describe('noaaMarineGetConditions', () => {
