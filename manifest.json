@@ -2,8 +2,11 @@
   "manifest_version": "0.3",
   "name": "noaa-marine-mcp-server",
   "version": "0.1.0",
-  "description": "",
-  "author": { "name": "" },
+  "description": "Find NOAA tide stations and NDBC buoys, fetch tide predictions, currents, and live conditions.",
+  "author": { "name": "cyanheads" },
+  "repository": "https://github.com/cyanheads/noaa-marine-mcp-server",
+  "homepage": "https://github.com/cyanheads/noaa-marine-mcp-server#readme",
+  "license": "Apache-2.0",
   "server": {
     "type": "node",
     "entry_point": "dist/index.js",

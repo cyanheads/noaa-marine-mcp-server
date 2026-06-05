@@ -11,19 +11,6 @@
 
 ---
 
-## First Session
-
-This project was just scaffolded with `bunx @cyanheads/mcp-ts-core init`. You're holding a production-grade MCP framework with the hard parts already solved — error handling, telemetry, auth, transport, validation, lifecycle. What's missing is the **domain**. Your job: design the tool, resource, and service surface with the user, then implement it as small pure handlers that throw — the framework catches, classifies, and instruments the rest. Design before code; the user's first messages set direction, so wait for them before scaffolding definitions.
-
-> **Remove this section** from CLAUDE.md / AGENTS.md after completing these steps. The skills and conventions below remain — this block is one-time onboarding only.
-
-1. **Get your bearings.** Take stock of the project tree, the skills in `skills/`, and the tools/MCP servers available. Light tool use is fine for context-building — you're mapping the territory, not committing yet.
-2. **Read the framework docs** — `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` (builders, Context, errors, exports, conventions)
-3. **Run the `setup` skill** — read `skills/setup/SKILL.md` and follow its checklist (project orientation, agent protocol file selection, echo definition cleanup, skill sync)
-4. **Design the server** — read `skills/design-mcp-server/SKILL.md` and work through it with the user to map the domain into tools, resources, and services before scaffolding
-
----
-
 ## What's Next?
 
 When the user asks what's next or needs direction, suggest options based on the current project state. Common next steps:
@@ -60,35 +47,47 @@ Tailor suggestions to what's actually missing or stale — don't recite the full
 
 ```ts
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { getCoopsService } from '@/services/coops/coops-service.js';
 
-export const searchItems = tool('search_items', {
-  description: 'Search inventory items by query.',
-  annotations: { readOnlyHint: true },
+export const noaaMarineGetTidePredictions = tool('noaa_marine_get_tide_predictions', {
+  description: 'High/low tide predictions for a CO-OPS tide station over a date range.',
+  annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
-    query: z.string().describe('Search terms'),
-    limit: z.number().default(10).describe('Max results'),
+    station_id: z.string().describe('CO-OPS station ID (numeric, e.g. 9447130). Use noaa_marine_find_stations first.'),
+    begin_date: z.string().describe('Start date YYYYMMDD'),
+    end_date: z.string().describe('End date YYYYMMDD'),
+    datum: z.enum(['MLLW','MHHW','MSL','MTL','MHW','MLW','CD','STND']).default('MLLW').describe('Tidal datum. MLLW = US nautical chart datum (default).'),
+    interval: z.enum(['hilo','6min']).default('hilo').describe('hilo = high/low events; 6min = continuous curve.'),
   }),
   output: z.object({
-    items: z.array(z.object({
-      id: z.string().describe('Item ID'),
-      name: z.string().describe('Item name'),
-    })).describe('Matching items'),
+    station_id: z.string().describe('Station ID echoed for chaining'),
+    station_name: z.string().describe('Station name'),
+    datum: z.string().describe('Datum used'),
+    predictions: z.array(z.object({
+      time: z.string().describe('ISO datetime'),
+      height: z.number().describe('Water height in feet (MLLW default)'),
+      type: z.enum(['H','L']).optional().describe('H = high, L = low (hilo only)'),
+    })).describe('Tide prediction events'),
   }),
-  auth: ['inventory:read'],
-
+  errors: [
+    { reason: 'station_not_found', code: JsonRpcErrorCode.InvalidParams,
+      when: 'CO-OPS returned an error for the station ID',
+      recovery: 'Verify the station ID using noaa_marine_find_stations with types: ["tide"].' },
+    { reason: 'no_predictions', code: JsonRpcErrorCode.NotFound,
+      when: 'Station exists but CO-OPS returned no prediction data for the date range',
+      recovery: 'Station may be inactive or wrong type — use find_stations to confirm capabilities.' },
+  ],
   async handler(input, ctx) {
-    const items = await findItems(input.query, input.limit);
-    ctx.log.info('Search completed', { query: input.query, count: items.length });
-    return { items };
+    const svc = getCoopsService();
+    const result = await svc.getTidePredictions(input);
+    ctx.log.info('Tide predictions fetched', { station_id: input.station_id, count: result.predictions.length });
+    return result;
   },
-
-  // format() populates content[] — the markdown twin of structuredContent.
-  // Different clients read different surfaces (Claude Code → structuredContent,
-  // Claude Desktop → content[]); both must carry the same data.
-  // Enforced at lint time: every field in `output` must appear in the rendered text.
-  format: (result) => [{
+  format: (r) => [{
     type: 'text',
-    text: result.items.map(i => `**${i.id}**: ${i.name}`).join('\n'),
+    text: `**${r.station_name}** (${r.station_id}) — datum: ${r.datum}\n` +
+      r.predictions.map(p => `${p.time}: ${p.height} ft${p.type ? ` (${p.type})` : ''}`).join('\n'),
   }],
 });
 ```
@@ -98,33 +97,23 @@ export const searchItems = tool('search_items', {
 ```ts
 import { resource, z } from '@cyanheads/mcp-ts-core';
 import { notFound } from '@cyanheads/mcp-ts-core/errors';
+import { getCoopsService } from '@/services/coops/coops-service.js';
+import { getNdbcService } from '@/services/ndbc/ndbc-service.js';
 
-export const itemData = resource('inventory://{itemId}', {
-  description: 'Fetch an inventory item by ID.',
-  params: z.object({ itemId: z.string().describe('Item identifier') }),
-  auth: ['inventory:read'],
-  async handler(params, ctx) {
-    const item = await ctx.state.get(`item:${params.itemId}`);
-    if (!item) throw notFound(`Item ${params.itemId} not found`, { itemId: params.itemId });
-    return item;
-  },
-});
-```
-
-### Prompt
-
-```ts
-import { prompt, z } from '@cyanheads/mcp-ts-core';
-
-export const reviewCode = prompt('review_code', {
-  description: 'Review code for issues and best practices.',
-  args: z.object({
-    code: z.string().describe('Code to review'),
-    language: z.string().optional().describe('Programming language'),
+export const noaaMarineStationResource = resource('noaa-marine://station/{station_id}', {
+  name: 'noaa_marine_station',
+  description: 'Metadata for a CO-OPS or NDBC station by ID: name, coordinates, source, capabilities, and state.',
+  mimeType: 'application/json',
+  params: z.object({
+    station_id: z.string().describe('CO-OPS numeric/alphanumeric ID or 5-char NDBC buoy ID.'),
   }),
-  generate: (args) => [
-    { role: 'user', content: { type: 'text', text: `Review this ${args.language ?? ''} code:\n${args.code}` } },
-  ],
+  async handler(params, ctx) {
+    const coopsSvc = getCoopsService();
+    const ndbcSvc = getNdbcService();
+    const station = await coopsSvc.getStation(params.station_id) ?? ndbcSvc.getStation(params.station_id);
+    if (!station) throw notFound(`Station ${params.station_id} not found`);
+    return station;
+  },
 });
 ```
 
@@ -136,21 +125,22 @@ import { z } from '@cyanheads/mcp-ts-core';
 import { parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
 
 const ServerConfigSchema = z.object({
-  apiKey: z.string().describe('External API key'),
-  maxResults: z.coerce.number().default(100),
+  applicationId: z
+    .string()
+    .default('noaa-marine-mcp-server')
+    .describe('Courtesy identifier sent as application= on CO-OPS requests.'),
 });
 
 let _config: z.infer<typeof ServerConfigSchema> | undefined;
 export function getServerConfig() {
   _config ??= parseEnvConfig(ServerConfigSchema, {
-    apiKey: 'MY_API_KEY',
-    maxResults: 'MY_MAX_RESULTS',
+    applicationId: 'NOAA_APPLICATION_ID',
   });
   return _config;
 }
 ```
 
-`parseEnvConfig` maps Zod schema paths → env var names so errors name the variable (`MY_API_KEY`) not the path (`apiKey`). Throws `ConfigurationError`, which the framework prints as a clean startup banner.
+`parseEnvConfig` maps Zod schema paths → env var names so errors name the variable (`NOAA_APPLICATION_ID`) not the path (`applicationId`). Throws `ConfigurationError`, which the framework prints as a clean startup banner.
 
 ### Server instructions
 
@@ -223,20 +213,25 @@ See framework CLAUDE.md and the `api-errors` skill for the full auto-classificat
 
 ```text
 src/
-  index.ts                              # createApp() entry point
+  index.ts                              # createApp() entry point — registers tools, resource, services
   config/
-    server-config.ts                    # Server-specific env vars (Zod schema)
+    server-config.ts                    # NOAA_APPLICATION_ID env var (optional, defaults to server name)
   services/
-    [domain]/
-      [domain]-service.ts               # Domain service (init/accessor pattern)
-      types.ts                          # Domain types
+    coops/
+      coops-service.ts                  # CO-OPS Tides & Currents API (station cache, data fetch)
+      types.ts                          # CO-OPS domain types
+    ndbc/
+      ndbc-service.ts                   # NDBC buoy service (active stations XML, realtime text)
+      types.ts                          # NDBC domain types
   mcp-server/
     tools/definitions/
-      [tool-name].tool.ts               # Tool definitions
+      noaa-marine-find-stations.tool.ts        # noaa_marine_find_stations
+      noaa-marine-get-tide-predictions.tool.ts # noaa_marine_get_tide_predictions
+      noaa-marine-get-water-level.tool.ts      # noaa_marine_get_water_level
+      noaa-marine-get-currents.tool.ts         # noaa_marine_get_currents
+      noaa-marine-get-conditions.tool.ts       # noaa_marine_get_conditions
     resources/definitions/
-      [resource-name].resource.ts       # Resource definitions
-    prompts/definitions/
-      [prompt-name].prompt.ts           # Prompt definitions
+      noaa-marine-station.resource.ts   # noaa-marine://station/{station_id}
 ```
 
 ---

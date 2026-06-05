@@ -1,9 +1,9 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "noaa-marine-mcp-server",
-  "description": "",
+  "name": "io.github.cyanheads/noaa-marine-mcp-server",
+  "description": "Find NOAA tide stations and NDBC buoys, fetch tide predictions, currents, and live conditions.",
   "repository": {
-    "url": "",
+    "url": "https://github.com/cyanheads/noaa-marine-mcp-server",
     "source": "github"
   },
   "version": "0.1.0",
@@ -11,8 +11,8 @@
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
-      "identifier": "noaa-marine-mcp-server",
-      "runtimeHint": "node",
+      "identifier": "@cyanheads/noaa-marine-mcp-server",
+      "runtimeHint": "bun",
       "version": "0.1.0",
       "packageArguments": [
         {
@@ -25,6 +25,13 @@
         }
       ],
       "environmentVariables": [
+        {
+          "name": "NOAA_APPLICATION_ID",
+          "description": "Courtesy identifier sent as application= on CO-OPS requests. Defaults to noaa-marine-mcp-server.",
+          "format": "string",
+          "isRequired": false,
+          "default": "noaa-marine-mcp-server"
+        },
         {
           "name": "MCP_LOG_LEVEL",
           "description": "Sets the minimum log level for output (e.g., 'debug', 'info', 'warn').",
@@ -40,8 +47,8 @@
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
-      "identifier": "noaa-marine-mcp-server",
-      "runtimeHint": "node",
+      "identifier": "@cyanheads/noaa-marine-mcp-server",
+      "runtimeHint": "bun",
       "version": "0.1.0",
       "packageArguments": [
         {
@@ -54,6 +61,13 @@
         }
       ],
       "environmentVariables": [
+        {
+          "name": "NOAA_APPLICATION_ID",
+          "description": "Courtesy identifier sent as application= on CO-OPS requests. Defaults to noaa-marine-mcp-server.",
+          "format": "string",
+          "isRequired": false,
+          "default": "noaa-marine-mcp-server"
+        },
         {
           "name": "MCP_HTTP_HOST",
           "description": "The hostname for the HTTP server.",
