@@ -4,7 +4,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { getCoopsService } from '@/services/coops/coops-service.js';
 
 function parseDateStr(s: string): Date {
@@ -167,11 +167,16 @@ export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
 
     if (obsResult.status === 'rejected') {
       const err = obsResult.reason;
-      const msg = err instanceof Error ? err.message : String(err);
-      if (msg.includes('CO-OPS error:')) {
-        throw ctx.fail('station_not_found', `CO-OPS rejected station ${input.station_id}: ${msg}`, {
-          ...ctx.recoveryFor('station_not_found'),
-        });
+      // CO-OPS returns HTTP 400 for invalid station IDs — fetchWithTimeout intercepts before JSON parsing.
+      if (err instanceof McpError) {
+        const statusCode = (err.data as Record<string, unknown> | undefined)?.statusCode;
+        if (statusCode === 400) {
+          throw ctx.fail(
+            'station_not_found',
+            `CO-OPS rejected station ${input.station_id} — use noaa_marine_find_stations with types=["water_level"] to verify the ID.`,
+            { ...ctx.recoveryFor('station_not_found') },
+          );
+        }
       }
       throw err;
     }

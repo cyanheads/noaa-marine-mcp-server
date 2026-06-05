@@ -4,7 +4,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { getCoopsService } from '@/services/coops/coops-service.js';
 
 function parseDateStr(s: string): Date {
@@ -134,6 +134,16 @@ export const noaaMarineGetCurrents = tool('noaa_marine_get_currents', {
     }
 
     const svc = getCoopsService();
+
+    // CO-OPS currents_predictions API does not return station metadata — look up from cache.
+    const [currentStations] = await Promise.allSettled([
+      svc.getStations('currentpredictions', ctx),
+    ]);
+    const stationMeta =
+      currentStations.status === 'fulfilled'
+        ? currentStations.value.find((s) => s.id === input.station_id)
+        : undefined;
+
     let result: {
       events?: Array<{
         Time: string;
@@ -159,11 +169,16 @@ export const noaaMarineGetCurrents = tool('noaa_marine_get_currents', {
         ctx,
       );
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (msg.includes('CO-OPS error:')) {
-        throw ctx.fail('station_not_found', `CO-OPS rejected station ${input.station_id}: ${msg}`, {
-          ...ctx.recoveryFor('station_not_found'),
-        });
+      // CO-OPS returns HTTP 400 for invalid station IDs — fetchWithTimeout intercepts before JSON parsing.
+      if (err instanceof McpError) {
+        const statusCode = (err.data as Record<string, unknown> | undefined)?.statusCode;
+        if (statusCode === 400) {
+          throw ctx.fail(
+            'station_not_found',
+            `CO-OPS rejected station ${input.station_id} — current stations need alphanumeric IDs. Use noaa_marine_find_stations with types=["current"].`,
+            { ...ctx.recoveryFor('station_not_found') },
+          );
+        }
       }
       throw err;
     }
@@ -215,7 +230,7 @@ export const noaaMarineGetCurrents = tool('noaa_marine_get_currents', {
 
       return {
         station_id: input.station_id,
-        station_name: result.stationName,
+        station_name: stationMeta?.name ?? result.stationName,
         units: input.units,
         events,
       };
@@ -244,7 +259,7 @@ export const noaaMarineGetCurrents = tool('noaa_marine_get_currents', {
 
     return {
       station_id: input.station_id,
-      station_name: result.stationName,
+      station_name: stationMeta?.name ?? result.stationName,
       units: input.units,
       predictions,
     };

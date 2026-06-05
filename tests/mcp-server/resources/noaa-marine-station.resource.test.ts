@@ -113,6 +113,28 @@ describe('noaaMarineStationResource', () => {
     });
   });
 
+  it('deduplicates capabilities when station appears multiple times in a CO-OPS list', async () => {
+    const ctx = createMockContext({ tenantId: 'test' });
+
+    const { getCoopsService } = await import('@/services/coops/coops-service.js');
+    const { getNdbcService } = await import('@/services/ndbc/ndbc-service.js');
+    // Simulate PUG1616 appearing 3 times in currentpredictions (different current bins)
+    const PUG1616 = { id: 'PUG1616', name: 'Admiralty Inlet', lat: 48.03, lng: -122.64, type: 'H' };
+    vi.spyOn(getCoopsService(), 'getStations').mockImplementation(async (type) => {
+      if (type === 'currentpredictions') return [PUG1616, PUG1616, PUG1616];
+      return [];
+    });
+    vi.spyOn(getNdbcService(), 'getActiveStations').mockResolvedValue([]);
+
+    const params = noaaMarineStationResource.params.parse({ station_id: 'PUG1616' });
+    const result = (await noaaMarineStationResource.handler(params, ctx)) as Record<
+      string,
+      unknown
+    >;
+
+    expect(result.capabilities).toEqual(['current']);
+  });
+
   it('includes owner field for NDBC stations that have one', async () => {
     const ctx = createMockContext({ tenantId: 'test' });
 

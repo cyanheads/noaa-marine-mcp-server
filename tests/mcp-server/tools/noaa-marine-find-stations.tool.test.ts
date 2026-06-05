@@ -130,6 +130,35 @@ describe('noaaMarineFindStations', () => {
     expect(result.stations[0]!.distance_km!).toBeLessThan(10);
   });
 
+  it('deduplicates capabilities when station appears multiple times in a list', async () => {
+    const ctx = createMockContext({ errors: noaaMarineFindStations.errors });
+
+    const { getCoopsService } = await import('@/services/coops/coops-service.js');
+    const { getNdbcService } = await import('@/services/ndbc/ndbc-service.js');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    initCoopsService(null as any, null as any, { applicationId: 'test' });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    initNdbcService(null as any, null as any);
+    // Simulate current station appearing 3 times (different bins) in currentpredictions
+    vi.spyOn(getCoopsService(), 'getStations').mockImplementation(async (type) => {
+      if (type === 'currentpredictions') {
+        return [
+          { ...COOPS_TIDE_STATION, id: 'PUG1616', state: undefined },
+          { ...COOPS_TIDE_STATION, id: 'PUG1616', state: undefined },
+          { ...COOPS_TIDE_STATION, id: 'PUG1616', state: undefined },
+        ];
+      }
+      return [];
+    });
+    vi.spyOn(getNdbcService(), 'getActiveStations').mockResolvedValue([]);
+
+    const input = noaaMarineFindStations.input.parse({ query: 'seattle', source: 'coops' });
+    const result = await noaaMarineFindStations.handler(input, ctx);
+
+    expect(result.stations).toHaveLength(1);
+    expect(result.stations[0]!.capabilities).toEqual(['current']);
+  });
+
   it('format renders station_id, name, source, and capabilities', () => {
     const output = {
       total_found: 1,

@@ -4,7 +4,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { getCoopsService } from '@/services/coops/coops-service.js';
 
 /** Parse YYYYMMDD → Date for range validation. */
@@ -135,6 +135,14 @@ export const noaaMarineGetTidePredictions = tool('noaa_marine_get_tide_predictio
     }
 
     const svc = getCoopsService();
+
+    // CO-OPS predictions API does not return station metadata — look up from cached station list.
+    const [tideStations] = await Promise.allSettled([svc.getStations('tidepredictions', ctx)]);
+    const stationMeta =
+      tideStations.status === 'fulfilled'
+        ? tideStations.value.find((s) => s.id === input.station_id)
+        : undefined;
+
     let result: {
       predictions: Array<{ t: string; v: string; type?: string }>;
       stationName: string;
@@ -154,12 +162,17 @@ export const noaaMarineGetTidePredictions = tool('noaa_marine_get_tide_predictio
         ctx,
       );
     } catch (err) {
-      // CO-OPS station errors surface as ServiceUnavailable with message containing "error:"
-      const msg = err instanceof Error ? err.message : String(err);
-      if (msg.includes('CO-OPS error:')) {
-        throw ctx.fail('station_not_found', `CO-OPS rejected station ${input.station_id}: ${msg}`, {
-          ...ctx.recoveryFor('station_not_found'),
-        });
+      // CO-OPS returns HTTP 400 when the station ID is invalid or wrong type.
+      // fetchWithTimeout intercepts it before service-level JSON parsing — detect via statusCode.
+      if (err instanceof McpError) {
+        const statusCode = (err.data as Record<string, unknown> | undefined)?.statusCode;
+        if (statusCode === 400) {
+          throw ctx.fail(
+            'station_not_found',
+            `CO-OPS rejected station ${input.station_id} — use noaa_marine_find_stations with types=["tide"] to verify the ID.`,
+            { ...ctx.recoveryFor('station_not_found') },
+          );
+        }
       }
       throw err;
     }
@@ -189,7 +202,7 @@ export const noaaMarineGetTidePredictions = tool('noaa_marine_get_tide_predictio
 
     return {
       station_id: input.station_id,
-      station_name: result.stationName,
+      station_name: stationMeta?.name ?? result.stationName,
       datum: input.datum,
       units: input.units,
       predictions,

@@ -4,7 +4,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { getNdbcService } from '@/services/ndbc/ndbc-service.js';
 
 export const noaaMarineGetConditions = tool('noaa_marine_get_conditions', {
@@ -108,11 +108,23 @@ export const noaaMarineGetConditions = tool('noaa_marine_get_conditions', {
     const stations = await ndbcSvc.getActiveStations(ctx);
     const meta = stations.find((s) => s.id.toUpperCase() === input.station_id.toUpperCase());
 
-    const obs = await ndbcSvc.fetchObservation(input.station_id, ctx);
-
-    // fetchObservation throws with reason in data for buoy_not_found and no_sensor_data,
-    // so those errors bubble through the auto-classifier. Re-throw via ctx.fail to wire
-    // the contract error codes properly.
+    let obs: Awaited<ReturnType<typeof ndbcSvc.fetchObservation>>;
+    try {
+      obs = await ndbcSvc.fetchObservation(input.station_id, ctx);
+    } catch (err) {
+      // fetchWithTimeout intercepts 404 before our notFound() check in the service runs.
+      // Re-classify as the typed contract reason so data.reason is populated.
+      if (err instanceof McpError && err.code === JsonRpcErrorCode.NotFound) {
+        throw ctx.fail(
+          'buoy_not_found',
+          `NDBC buoy ${input.station_id} not found — verify the ID with noaa_marine_find_stations.`,
+          {
+            ...ctx.recoveryFor('buoy_not_found'),
+          },
+        );
+      }
+      throw err;
+    }
 
     ctx.log.info('NDBC conditions fetched', {
       station_id: input.station_id,

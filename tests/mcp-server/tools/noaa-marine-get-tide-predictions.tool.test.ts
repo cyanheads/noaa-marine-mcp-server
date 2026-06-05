@@ -3,7 +3,7 @@
  * @module tests/mcp-server/tools/noaa-marine-get-tide-predictions.tool.test
  */
 
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { noaaMarineGetTidePredictions } from '@/mcp-server/tools/definitions/noaa-marine-get-tide-predictions.tool.js';
@@ -29,7 +29,13 @@ describe('noaaMarineGetTidePredictions', () => {
     const ctx = createMockContext({ errors: noaaMarineGetTidePredictions.errors });
 
     const { getCoopsService } = await import('@/services/coops/coops-service.js');
-    vi.spyOn(getCoopsService(), 'fetchTidePredictions').mockResolvedValue({
+    const svc = getCoopsService();
+    // Station list lookup for name resolution — returns the matching station
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    vi.spyOn(svc, 'getStations').mockResolvedValue([
+      { id: '9447130', name: 'Seattle', lat: 47.6, lng: -122.33, state: 'WA', type: 'R' },
+    ] as any);
+    vi.spyOn(svc, 'fetchTidePredictions').mockResolvedValue({
       predictions: TIDE_PREDICTIONS,
       stationName: 'Seattle',
     });
@@ -75,8 +81,12 @@ describe('noaaMarineGetTidePredictions', () => {
     const ctx = createMockContext({ errors: noaaMarineGetTidePredictions.errors });
 
     const { getCoopsService } = await import('@/services/coops/coops-service.js');
-    vi.spyOn(getCoopsService(), 'fetchTidePredictions').mockRejectedValue(
-      new Error('CO-OPS error: No data was found. This product may not exist at this station.'),
+    const svc = getCoopsService();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    vi.spyOn(svc, 'getStations').mockResolvedValue([] as any);
+    // CO-OPS returns HTTP 400 for invalid station IDs — simulate with McpError + statusCode
+    vi.spyOn(svc, 'fetchTidePredictions').mockRejectedValue(
+      new McpError(JsonRpcErrorCode.InvalidParams, 'CO-OPS fetch failed', { statusCode: 400 }),
     );
 
     const input = noaaMarineGetTidePredictions.input.parse({

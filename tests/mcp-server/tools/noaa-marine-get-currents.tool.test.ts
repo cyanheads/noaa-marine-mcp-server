@@ -3,7 +3,7 @@
  * @module tests/mcp-server/tools/noaa-marine-get-currents.tool.test
  */
 
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { noaaMarineGetCurrents } from '@/mcp-server/tools/definitions/noaa-marine-get-currents.tool.js';
@@ -35,7 +35,13 @@ describe('noaaMarineGetCurrents', () => {
     const ctx = createMockContext({ errors: noaaMarineGetCurrents.errors });
 
     const { getCoopsService } = await import('@/services/coops/coops-service.js');
-    vi.spyOn(getCoopsService(), 'fetchCurrentPredictions').mockResolvedValue({
+    const svc = getCoopsService();
+    // Station list lookup for name resolution
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    vi.spyOn(svc, 'getStations').mockResolvedValue([
+      { id: 'ACT4176', name: 'Admiralty Inlet', lat: 48.15, lng: -122.75 },
+    ] as any);
+    vi.spyOn(svc, 'fetchCurrentPredictions').mockResolvedValue({
       events: MAX_SLACK_EVENTS,
       stationName: 'Admiralty Inlet',
     });
@@ -106,8 +112,12 @@ describe('noaaMarineGetCurrents', () => {
     const ctx = createMockContext({ errors: noaaMarineGetCurrents.errors });
 
     const { getCoopsService } = await import('@/services/coops/coops-service.js');
-    vi.spyOn(getCoopsService(), 'fetchCurrentPredictions').mockRejectedValue(
-      new Error('CO-OPS error: No data was found.'),
+    const svc = getCoopsService();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    vi.spyOn(svc, 'getStations').mockResolvedValue([] as any);
+    // CO-OPS returns HTTP 400 for invalid station IDs — simulate with McpError + statusCode
+    vi.spyOn(svc, 'fetchCurrentPredictions').mockRejectedValue(
+      new McpError(JsonRpcErrorCode.InvalidParams, 'CO-OPS fetch failed', { statusCode: 400 }),
     );
 
     const input = noaaMarineGetCurrents.input.parse({

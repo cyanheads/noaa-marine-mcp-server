@@ -74,13 +74,6 @@ export class NdbcService {
           signal: ctx.signal,
         });
 
-        if (response.status === 404) {
-          throw notFound(`NDBC buoy ${stationId} not found — verify the station ID.`, {
-            stationId,
-            reason: 'buoy_not_found',
-          });
-        }
-
         const text = await response.text();
         if (/^\s*<(!DOCTYPE\s+html|html[\s>])/i.test(text)) {
           throw serviceUnavailable('NDBC realtime endpoint returned HTML — likely rate-limited.');
@@ -209,9 +202,13 @@ export class NdbcService {
     const hh = get('HH');
     const mn = getMinute();
 
-    // NDBC uses 2-digit year; add 2000 for current era
+    // NDBC emits 4-digit years in the YY column despite the column name suggesting otherwise.
+    // Treat values ≥ 1000 as already-full years; add 2000 only for genuine 2-digit values.
     const year = yy
-      ? (Number.parseInt(yy, 10) < 50 ? 2000 : 1900) + Number.parseInt(yy, 10)
+      ? (() => {
+          const n = Number.parseInt(yy, 10);
+          return n >= 1000 ? n : n < 50 ? 2000 + n : 1900 + n;
+        })()
       : new Date().getFullYear();
     const observedAt =
       yy && mo && dd && hh && mn

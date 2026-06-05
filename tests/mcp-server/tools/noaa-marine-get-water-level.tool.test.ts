@@ -3,7 +3,7 @@
  * @module tests/mcp-server/tools/noaa-marine-get-water-level.tool.test
  */
 
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { noaaMarineGetWaterLevel } from '@/mcp-server/tools/definitions/noaa-marine-get-water-level.tool.js';
@@ -77,8 +77,9 @@ describe('noaaMarineGetWaterLevel', () => {
     const ctx = createMockContext({ errors: noaaMarineGetWaterLevel.errors });
 
     const { getCoopsService } = await import('@/services/coops/coops-service.js');
+    // CO-OPS returns HTTP 400 for invalid station IDs — simulate with McpError + statusCode
     vi.spyOn(getCoopsService(), 'fetchWaterLevel').mockRejectedValue(
-      new Error('CO-OPS error: No data was found.'),
+      new McpError(JsonRpcErrorCode.InvalidParams, 'CO-OPS fetch failed', { statusCode: 400 }),
     );
 
     const input = noaaMarineGetWaterLevel.input.parse({

@@ -258,15 +258,19 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
 
       for (const s of tideStations) {
         if (!allCoops.has(s.id)) allCoops.set(s.id, { ...s, capabilities: [] });
-        allCoops.get(s.id)?.capabilities.push('tide');
+        const entry = allCoops.get(s.id);
+        if (entry && !entry.capabilities.includes('tide')) entry.capabilities.push('tide');
       }
       for (const s of currentStations) {
         if (!allCoops.has(s.id)) allCoops.set(s.id, { ...s, capabilities: [] });
-        allCoops.get(s.id)?.capabilities.push('current');
+        const entry = allCoops.get(s.id);
+        if (entry && !entry.capabilities.includes('current')) entry.capabilities.push('current');
       }
       for (const s of waterLevelStations) {
         if (!allCoops.has(s.id)) allCoops.set(s.id, { ...s, capabilities: [] });
-        allCoops.get(s.id)?.capabilities.push('water_level');
+        const entry = allCoops.get(s.id);
+        if (entry && !entry.capabilities.includes('water_level'))
+          entry.capabilities.push('water_level');
       }
 
       for (const [, s] of allCoops) {

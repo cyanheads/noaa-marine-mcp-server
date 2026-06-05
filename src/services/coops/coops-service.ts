@@ -234,6 +234,8 @@ export class CoopsService {
   }> {
     return await withRetry(
       async () => {
+        // CO-OPS currents_predictions API accepts "6" not "6min"; translate the user-facing enum.
+        const apiInterval = params.interval === '6min' ? '6' : params.interval;
         const url = this.buildDataUrl({
           station: params.station,
           product: 'currents_predictions',
@@ -241,7 +243,7 @@ export class CoopsService {
           end_date: params.end_date,
           time_zone: params.time_zone,
           units: params.units,
-          interval: params.interval,
+          interval: apiInterval,
           format: 'json',
         });
         const response = await fetchWithTimeout(url, 20_000, ctx as unknown as RequestContext, {
@@ -251,7 +253,10 @@ export class CoopsService {
         this.detectHtmlError(text);
         const parsed = JSON.parse(text);
         this.checkCoopsError(parsed, url);
-        const cp = parsed.current_predictions?.cp ?? [];
+        // CO-OPS MAX_SLACK returns cp as a string (e.g. "Currents are weak and variable")
+        // instead of an array when there are no significant flood/ebb/slack events.
+        const rawCp = parsed.current_predictions?.cp;
+        const cp: CoopsCurrentRow[] | CoopsCurrent6MinRow[] = Array.isArray(rawCp) ? rawCp : [];
         const stationName: string = parsed.metadata?.name ?? params.station;
         if (params.interval === 'MAX_SLACK') {
           return { events: cp as CoopsCurrentRow[], stationName };
