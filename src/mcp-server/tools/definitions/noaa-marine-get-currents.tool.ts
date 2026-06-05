@@ -25,6 +25,7 @@ export const noaaMarineGetCurrents = tool('noaa_marine_get_currents', {
   input: z.object({
     station_id: z
       .string()
+      .regex(/^[A-Za-z0-9_-]{1,20}$/)
       .describe(
         'CO-OPS current station ID (alphanumeric, e.g. "ACT4176"). ' +
           'Obtain from noaa_marine_find_stations with types=["current"].',

@@ -22,6 +22,7 @@ export const noaaMarineGetConditions = tool('noaa_marine_get_conditions', {
   input: z.object({
     station_id: z
       .string()
+      .regex(/^[A-Za-z0-9_-]{1,20}$/)
       .describe(
         'NDBC buoy station ID (5-character alphanumeric, e.g. "46041" for Cape Elizabeth). ' +
           'Obtain from noaa_marine_find_stations with source="ndbc".',

@@ -24,6 +24,7 @@ export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
   input: z.object({
     station_id: z
       .string()
+      .regex(/^[A-Za-z0-9_-]{1,20}$/)
       .describe(
         'CO-OPS water-level station ID (numeric, e.g. "9447130" for Seattle). ' +
           'Obtain from noaa_marine_find_stations with types=["water_level"].',

@@ -19,6 +19,7 @@ export const noaaMarineStationResource = resource('noaa-marine://station/{statio
   params: z.object({
     station_id: z
       .string()
+      .regex(/^[A-Za-z0-9_-]{1,20}$/)
       .describe(
         'Station identifier. CO-OPS: numeric (e.g. 9447130) or alphanumeric (e.g. ACT4176). NDBC: e.g. 46041.',
       ),

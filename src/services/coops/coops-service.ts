@@ -113,7 +113,7 @@ export class CoopsService {
         const text = await response.text();
         this.detectHtmlError(text);
         const parsed = JSON.parse(text);
-        this.checkCoopsError(parsed, url);
+        this.checkCoopsError(parsed);
         const predictions: CoopsPredictionRow[] = parsed.predictions ?? [];
         // Station name isn't in this response; caller handles it
         return { predictions, stationName: parsed.metadata?.name ?? params.station };
@@ -158,7 +158,7 @@ export class CoopsService {
         const text = await response.text();
         this.detectHtmlError(text);
         const parsed = JSON.parse(text);
-        this.checkCoopsError(parsed, url);
+        this.checkCoopsError(parsed);
         return { data: parsed.data ?? [], stationName: parsed.metadata?.name ?? params.station };
       },
       {
@@ -252,7 +252,7 @@ export class CoopsService {
         const text = await response.text();
         this.detectHtmlError(text);
         const parsed = JSON.parse(text);
-        this.checkCoopsError(parsed, url);
+        this.checkCoopsError(parsed);
         // CO-OPS MAX_SLACK returns cp as a string (e.g. "Currents are weak and variable")
         // instead of an array when there are no significant flood/ebb/slack events.
         const rawCp = parsed.current_predictions?.cp;
@@ -289,12 +289,12 @@ export class CoopsService {
     }
   }
 
-  private checkCoopsError(parsed: unknown, url: string): void {
+  private checkCoopsError(parsed: unknown): void {
     const p = parsed as CoopsErrorResponse | Record<string, unknown>;
     if (p && typeof p === 'object' && 'error' in p && p.error) {
       const errObj = p.error as { message?: string };
       const message = errObj.message ?? 'Unknown CO-OPS error';
-      throw serviceUnavailable(`CO-OPS error: ${message}`, { url });
+      throw serviceUnavailable(`CO-OPS error: ${message}`);
     }
   }
 }

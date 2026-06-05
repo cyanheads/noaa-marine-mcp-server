@@ -26,6 +26,7 @@ export const noaaMarineGetTidePredictions = tool('noaa_marine_get_tide_predictio
   input: z.object({
     station_id: z
       .string()
+      .regex(/^[A-Za-z0-9_-]{1,20}$/)
       .describe(
         'CO-OPS tide station ID (numeric, e.g. "9447130" for Seattle). ' +
           'Obtain from noaa_marine_find_stations with types=["tide"].',
