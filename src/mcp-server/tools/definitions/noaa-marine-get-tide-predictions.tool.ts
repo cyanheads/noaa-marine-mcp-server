@@ -5,7 +5,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { getCoopsService } from '@/services/coops/coops-service.js';
+import { getCoopsService, isCoopsBodyError } from '@/services/coops/coops-service.js';
 
 /** Parse YYYYMMDD → Date for range validation. */
 function parseDateStr(s: string): Date {
@@ -162,8 +162,23 @@ export const noaaMarineGetTidePredictions = tool('noaa_marine_get_tide_predictio
 
     if (predResult.status === 'rejected') {
       const err = predResult.reason;
-      // CO-OPS returns HTTP 400 when the station ID is invalid or wrong type.
-      // fetchWithTimeout intercepts it before service-level JSON parsing — detect via statusCode.
+      // CO-OPS body-level errors carry a typed coopsReason — map to contract reasons.
+      if (isCoopsBodyError(err)) {
+        if (err.coopsReason === 'no_predictions') {
+          throw ctx.fail(
+            'no_predictions',
+            `No tide prediction data for station ${input.station_id} — the station may be the wrong type or inactive.`,
+            { ...ctx.recoveryFor('no_predictions') },
+          );
+        }
+        // station_error or no_data → station_not_found
+        throw ctx.fail(
+          'station_not_found',
+          `CO-OPS does not have data for station ${input.station_id} — use noaa_marine_find_stations with types=["tide"] to verify the ID.`,
+          { ...ctx.recoveryFor('station_not_found') },
+        );
+      }
+      // CO-OPS HTTP 400 — invalid/unknown station ID before response body is parsed.
       if (err instanceof McpError) {
         const statusCode = (err.data as Record<string, unknown> | undefined)?.statusCode;
         if (statusCode === 400) {

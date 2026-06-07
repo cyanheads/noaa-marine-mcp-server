@@ -7,7 +7,7 @@ import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { noaaMarineGetTidePredictions } from '@/mcp-server/tools/definitions/noaa-marine-get-tide-predictions.tool.js';
-import { initCoopsService } from '@/services/coops/coops-service.js';
+import { CoopsBodyError, initCoopsService } from '@/services/coops/coops-service.js';
 
 const TIDE_PREDICTIONS = [
   { t: '2025-01-15 06:23', v: '5.42', type: 'H' },
@@ -117,6 +117,49 @@ describe('noaaMarineGetTidePredictions', () => {
     await expect(noaaMarineGetTidePredictions.handler(input, ctx)).rejects.toMatchObject({
       code: JsonRpcErrorCode.NotFound,
       data: { reason: 'no_predictions' },
+    });
+  });
+
+  it('throws ctx.fail("no_predictions") on CoopsBodyError with no_predictions reason', async () => {
+    const ctx = createMockContext({ errors: noaaMarineGetTidePredictions.errors });
+
+    const { getCoopsService } = await import('@/services/coops/coops-service.js');
+    const svc = getCoopsService();
+    vi.spyOn(svc, 'getStations').mockResolvedValue([] as never);
+    vi.spyOn(svc, 'fetchTidePredictions').mockRejectedValue(
+      new CoopsBodyError('no_predictions', 'CO-OPS error: No Predictions data was found.'),
+    );
+
+    const input = noaaMarineGetTidePredictions.input.parse({
+      station_id: '9447130',
+      begin_date: '20250115',
+      end_date: '20250115',
+      interval: '6min',
+    });
+    await expect(noaaMarineGetTidePredictions.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: { reason: 'no_predictions' },
+    });
+  });
+
+  it('throws ctx.fail("station_not_found") on CoopsBodyError with station_error reason', async () => {
+    const ctx = createMockContext({ errors: noaaMarineGetTidePredictions.errors });
+
+    const { getCoopsService } = await import('@/services/coops/coops-service.js');
+    const svc = getCoopsService();
+    vi.spyOn(svc, 'getStations').mockResolvedValue([] as never);
+    vi.spyOn(svc, 'fetchTidePredictions').mockRejectedValue(
+      new CoopsBodyError('station_error', 'CO-OPS error: Station not available.'),
+    );
+
+    const input = noaaMarineGetTidePredictions.input.parse({
+      station_id: '9999999',
+      begin_date: '20250115',
+      end_date: '20250115',
+    });
+    await expect(noaaMarineGetTidePredictions.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.InvalidParams,
+      data: { reason: 'station_not_found' },
     });
   });
 

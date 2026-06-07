@@ -5,7 +5,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { getCoopsService } from '@/services/coops/coops-service.js';
+import { getCoopsService, isCoopsBodyError } from '@/services/coops/coops-service.js';
 
 function parseDateStr(s: string): Date {
   return new Date(`${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}T00:00:00Z`);
@@ -168,7 +168,23 @@ export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
 
     if (obsResult.status === 'rejected') {
       const err = obsResult.reason;
-      // CO-OPS returns HTTP 400 for invalid station IDs — fetchWithTimeout intercepts before JSON parsing.
+      // CO-OPS body-level errors carry a typed coopsReason — map to contract reasons.
+      if (isCoopsBodyError(err)) {
+        if (err.coopsReason === 'no_data' || err.coopsReason === 'no_predictions') {
+          throw ctx.fail(
+            'no_data',
+            `No water level data for station ${input.station_id} in the requested date range.`,
+            { ...ctx.recoveryFor('no_data') },
+          );
+        }
+        // station_error → station_not_found
+        throw ctx.fail(
+          'station_not_found',
+          `CO-OPS does not have data for station ${input.station_id} — use noaa_marine_find_stations with types=["water_level"] to verify the ID.`,
+          { ...ctx.recoveryFor('station_not_found') },
+        );
+      }
+      // CO-OPS HTTP 400 — invalid station ID before response body is parsed.
       if (err instanceof McpError) {
         const statusCode = (err.data as Record<string, unknown> | undefined)?.statusCode;
         if (statusCode === 400) {

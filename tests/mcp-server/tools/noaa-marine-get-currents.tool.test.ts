@@ -7,7 +7,7 @@ import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { noaaMarineGetCurrents } from '@/mcp-server/tools/definitions/noaa-marine-get-currents.tool.js';
-import { initCoopsService } from '@/services/coops/coops-service.js';
+import { CoopsBodyError, initCoopsService } from '@/services/coops/coops-service.js';
 
 const MAX_SLACK_EVENTS = [
   { Time: '2025-01-15 06:30', Type: 'max flood', Velocity_Major: '1.8', meanFloodDir: '90' },
@@ -95,6 +95,33 @@ describe('noaaMarineGetCurrents', () => {
     });
   });
 
+  it('returns direction: null when CO-OPS does not provide Direction field in 6-min predictions', async () => {
+    const ctx = createMockContext({ errors: noaaMarineGetCurrents.errors });
+
+    const predsNoDir = [
+      { Time: '2025-01-15 06:00', Velocity_Major: '1.2' }, // Direction absent
+      { Time: '2025-01-15 06:06', Velocity_Major: '1.4' }, // Direction absent
+    ];
+
+    const { getCoopsService } = await import('@/services/coops/coops-service.js');
+    vi.spyOn(getCoopsService(), 'fetchCurrentPredictions').mockResolvedValue({
+      predictions: predsNoDir,
+      stationName: 'Puget Sound Station',
+    });
+
+    const input = noaaMarineGetCurrents.input.parse({
+      station_id: 'PUG1516',
+      begin_date: '20250115',
+      end_date: '20250115',
+      interval: '6min',
+    });
+    const result = await noaaMarineGetCurrents.handler(input, ctx);
+
+    expect(result.predictions).toHaveLength(2);
+    expect(result.predictions![0].direction).toBeNull();
+    expect(result.predictions![1].direction).toBeNull();
+  });
+
   it('throws ctx.fail("date_range_exceeded") for range > 365 days', async () => {
     const ctx = createMockContext({ errors: noaaMarineGetCurrents.errors });
     const input = noaaMarineGetCurrents.input.parse({
@@ -148,6 +175,51 @@ describe('noaaMarineGetCurrents', () => {
     await expect(noaaMarineGetCurrents.handler(input, ctx)).rejects.toMatchObject({
       code: JsonRpcErrorCode.NotFound,
       data: { reason: 'no_predictions' },
+    });
+  });
+
+  it('throws ctx.fail("no_predictions") on CoopsBodyError with no_predictions reason', async () => {
+    const ctx = createMockContext({ errors: noaaMarineGetCurrents.errors });
+
+    const { getCoopsService } = await import('@/services/coops/coops-service.js');
+    const svc = getCoopsService();
+    vi.spyOn(svc, 'getStations').mockResolvedValue([] as never);
+    vi.spyOn(svc, 'fetchCurrentPredictions').mockRejectedValue(
+      new CoopsBodyError(
+        'no_predictions',
+        'CO-OPS error: Currents predictions are not available from the requested station.',
+      ),
+    );
+
+    const input = noaaMarineGetCurrents.input.parse({
+      station_id: 'PCT1676',
+      begin_date: '20250115',
+      end_date: '20250115',
+    });
+    await expect(noaaMarineGetCurrents.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: { reason: 'no_predictions' },
+    });
+  });
+
+  it('throws ctx.fail("station_not_found") on CoopsBodyError with station_error reason', async () => {
+    const ctx = createMockContext({ errors: noaaMarineGetCurrents.errors });
+
+    const { getCoopsService } = await import('@/services/coops/coops-service.js');
+    const svc = getCoopsService();
+    vi.spyOn(svc, 'getStations').mockResolvedValue([] as never);
+    vi.spyOn(svc, 'fetchCurrentPredictions').mockRejectedValue(
+      new CoopsBodyError('station_error', 'CO-OPS error: Invalid station ID.'),
+    );
+
+    const input = noaaMarineGetCurrents.input.parse({
+      station_id: 'BADID',
+      begin_date: '20250115',
+      end_date: '20250115',
+    });
+    await expect(noaaMarineGetCurrents.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.InvalidParams,
+      data: { reason: 'station_not_found' },
     });
   });
 

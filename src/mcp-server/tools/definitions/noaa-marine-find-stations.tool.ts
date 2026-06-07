@@ -86,7 +86,9 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
     'This is the required first step to resolve place names or coordinates to station IDs before calling data tools. ' +
     'CO-OPS station IDs are numeric (e.g. 9447130 for Seattle); current station IDs are alphanumeric (e.g. ACT4176). ' +
     'NDBC buoy IDs are 5-character alphanumeric codes (e.g. 46041). ' +
-    'Provide latitude/longitude for proximity search, or query/state for name-based search — both may be combined.',
+    'Provide latitude/longitude for proximity search, or query/state for name-based search — both may be combined. ' +
+    'Note: CO-OPS current stations are cataloged by monitoring capability, not prediction availability. ' +
+    'If noaa_marine_get_currents returns no_predictions for a station, try the next nearest current station.',
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   input: z.object({

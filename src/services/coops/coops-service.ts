@@ -5,7 +5,7 @@
 
 import type { Context } from '@cyanheads/mcp-ts-core';
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
-import { serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import { fetchWithTimeout, type RequestContext, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import type { ServerConfig } from '@/config/server-config.js';
@@ -19,6 +19,36 @@ import type {
   CoopsStationListResponse,
   CoopsStationType,
 } from './types.js';
+
+/**
+ * Thrown when CO-OPS returns a body-level error response.
+ * Carries a `coopsReason` discriminator so tool handlers can map it to a
+ * typed contract reason without string-parsing the raw CO-OPS message.
+ *
+ *   'no_data'        — no observations for the date range / station type
+ *   'no_predictions' — no prediction data available
+ *   'station_error'  — station rejected / not available
+ */
+export class CoopsBodyError extends McpError {
+  readonly coopsReason: 'no_data' | 'no_predictions' | 'station_error';
+
+  constructor(coopsReason: 'no_data' | 'no_predictions' | 'station_error', message: string) {
+    // retryable: false — deterministic domain errors should not be retried.
+    super(JsonRpcErrorCode.ServiceUnavailable, message, { coopsReason, retryable: false });
+    this.coopsReason = coopsReason;
+  }
+}
+
+/** Type guard for CoopsBodyError — avoids instanceof brittleness across module boundaries. */
+export function isCoopsBodyError(
+  err: unknown,
+): err is CoopsBodyError & { coopsReason: 'no_data' | 'no_predictions' | 'station_error' } {
+  return (
+    err instanceof Error &&
+    'coopsReason' in err &&
+    typeof (err as CoopsBodyError).coopsReason === 'string'
+  );
+}
 
 const DATA_URL = 'https://api.tidesandcurrents.noaa.gov/api/prod/datagetter';
 const MDAPI_URL = 'https://api.tidesandcurrents.noaa.gov/mdapi/prod/webapi/stations.json';
@@ -96,6 +126,8 @@ export class CoopsService {
   ): Promise<{ predictions: CoopsPredictionRow[]; stationName: string }> {
     return await withRetry(
       async () => {
+        // CO-OPS predictions API accepts "6" not "6min"; translate the user-facing enum.
+        const apiInterval = params.interval === '6min' ? '6' : params.interval;
         const url = this.buildDataUrl({
           station: params.station,
           product: 'predictions',
@@ -104,7 +136,7 @@ export class CoopsService {
           datum: params.datum,
           time_zone: params.time_zone,
           units: params.units,
-          interval: params.interval,
+          interval: apiInterval,
           format: 'json',
         });
         const response = await fetchWithTimeout(url, 20_000, ctx as unknown as RequestContext, {
@@ -291,11 +323,29 @@ export class CoopsService {
 
   private checkCoopsError(parsed: unknown): void {
     const p = parsed as CoopsErrorResponse | Record<string, unknown>;
-    if (p && typeof p === 'object' && 'error' in p && p.error) {
-      const errObj = p.error as { message?: string };
-      const message = errObj.message ?? 'Unknown CO-OPS error';
-      throw serviceUnavailable(`CO-OPS error: ${message}`);
+    if (!(p && typeof p === 'object' && 'error' in p && p.error)) return;
+    const errObj = p.error as { message?: string };
+    const message = errObj.message ?? 'Unknown CO-OPS error';
+    const lower = message.toLowerCase();
+
+    // Deterministic domain errors — map to typed reasons; no retry warranted.
+    if (lower.includes('no predictions') || lower.includes('no data was found')) {
+      throw new CoopsBodyError('no_predictions', `CO-OPS error: ${message}`);
     }
+    if (
+      lower.includes('not available from the requested station') ||
+      lower.includes('station not available') ||
+      lower.includes('no data found') ||
+      lower.includes('invalid station')
+    ) {
+      throw new CoopsBodyError('station_error', `CO-OPS error: ${message}`);
+    }
+    if (lower.includes('no data') || lower.includes('no observations')) {
+      throw new CoopsBodyError('no_data', `CO-OPS error: ${message}`);
+    }
+
+    // Unknown CO-OPS error — generic ServiceUnavailable.
+    throw serviceUnavailable(`CO-OPS error: ${message}`);
   }
 }
 

@@ -5,7 +5,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { getCoopsService } from '@/services/coops/coops-service.js';
+import { getCoopsService, isCoopsBodyError } from '@/services/coops/coops-service.js';
 
 function parseDateStr(s: string): Date {
   return new Date(`${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}T00:00:00Z`);
@@ -91,7 +91,12 @@ export const noaaMarineGetCurrents = tool('noaa_marine_get_currents', {
           .object({
             time: z.string().describe('Prediction datetime in the requested time zone.'),
             speed: z.number().describe('Current speed in the requested units.'),
-            direction: z.number().describe('True bearing direction in degrees (0–360).'),
+            direction: z
+              .number()
+              .nullable()
+              .describe(
+                'True bearing direction in degrees (0–360). Null when CO-OPS does not report direction for this station type.',
+              ),
           })
           .describe('A single 6-minute current prediction.'),
       )
@@ -160,7 +165,23 @@ export const noaaMarineGetCurrents = tool('noaa_marine_get_currents', {
 
     if (predResult.status === 'rejected') {
       const err = predResult.reason;
-      // CO-OPS returns HTTP 400 for invalid station IDs — fetchWithTimeout intercepts before JSON parsing.
+      // CO-OPS body-level errors carry a typed coopsReason — map to contract reasons.
+      if (isCoopsBodyError(err)) {
+        if (err.coopsReason === 'no_predictions') {
+          throw ctx.fail(
+            'no_predictions',
+            `No current prediction data for station ${input.station_id} — the station may be inactive or not a prediction station.`,
+            { ...ctx.recoveryFor('no_predictions') },
+          );
+        }
+        // station_error or no_data → station_not_found
+        throw ctx.fail(
+          'station_not_found',
+          `CO-OPS does not have current data for station ${input.station_id} — use noaa_marine_find_stations with types=["current"] to find a valid station.`,
+          { ...ctx.recoveryFor('station_not_found') },
+        );
+      }
+      // CO-OPS HTTP 400 — invalid station ID before response body is parsed.
       if (err instanceof McpError) {
         const statusCode = (err.data as Record<string, unknown> | undefined)?.statusCode;
         if (statusCode === 400) {
@@ -242,7 +263,7 @@ export const noaaMarineGetCurrents = tool('noaa_marine_get_currents', {
     const predictions = raw6.map((p) => ({
       time: p.Time,
       speed: Math.abs(Number.parseFloat(p.Velocity_Major ?? '0')),
-      direction: Number.parseFloat(p.Direction ?? '0'),
+      direction: p.Direction != null ? Number.parseFloat(p.Direction) : null,
     }));
 
     ctx.log.info('Current predictions (6min) fetched', {
@@ -279,9 +300,8 @@ export const noaaMarineGetCurrents = tool('noaa_marine_get_currents', {
       lines.push(`**6-min predictions** (${result.predictions.length} records):`);
       const toShow = result.predictions.slice(0, 10);
       for (const p of toShow) {
-        lines.push(
-          `${p.time}: ${p.speed} ${result.units === 'metric' ? 'm/s' : 'kt'} @${p.direction}°`,
-        );
+        const dirStr = p.direction != null ? ` @${p.direction}°` : '';
+        lines.push(`${p.time}: ${p.speed} ${result.units === 'metric' ? 'm/s' : 'kt'}${dirStr}`);
       }
       if (result.predictions.length > 10) {
         lines.push(`... and ${result.predictions.length - 10} more`);
