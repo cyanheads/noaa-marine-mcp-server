@@ -193,6 +193,12 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
     total_found: z
       .number()
       .describe('Total stations matching the filters before the limit was applied.'),
+    truncated: z
+      .boolean()
+      .optional()
+      .describe(
+        'True when total_found exceeds the limit and not all matching stations are returned. Increase limit or narrow filters to see more.',
+      ),
   }),
 
   errors: [
@@ -375,19 +381,28 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
 
     const stations = results.slice(0, input.limit);
 
+    if (stations.length < total_found) {
+      ctx.enrich.truncated({ shown: stations.length, cap: input.limit, ceiling: total_found });
+    }
+
     ctx.log.info('Station search complete', {
       total_found,
       returned: stations.length,
       source: input.source,
     });
 
-    return { stations, total_found };
+    return {
+      stations,
+      total_found,
+      ...(stations.length < total_found ? { truncated: true } : {}),
+    };
   },
 
   format: (result) => {
-    const lines: string[] = [
-      `**${result.total_found} station(s) found** (showing ${result.stations.length})\n`,
-    ];
+    const header = result.truncated
+      ? `**${result.total_found} station(s) found** (showing ${result.stations.length} — results truncated, increase limit or narrow filters)\n`
+      : `**${result.total_found} station(s) found** (showing ${result.stations.length})\n`;
+    const lines: string[] = [header];
     for (const s of result.stations) {
       const dist = s.distance_km !== undefined ? ` · ${s.distance_km} km` : '';
       const state = s.state ? ` · ${s.state}` : '';
