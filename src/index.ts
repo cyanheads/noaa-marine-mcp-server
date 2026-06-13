@@ -16,6 +16,8 @@ import { initCoopsService } from './services/coops/coops-service.js';
 import { initNdbcService } from './services/ndbc/ndbc-service.js';
 
 await createApp({
+  name: 'noaa-marine-mcp-server',
+  title: 'noaa-marine-mcp-server',
   tools: [
     noaaMarineFindStations,
     noaaMarineGetTidePredictions,
