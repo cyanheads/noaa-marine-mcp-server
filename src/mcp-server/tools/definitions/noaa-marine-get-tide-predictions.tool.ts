@@ -102,14 +102,14 @@ export const noaaMarineGetTidePredictions = tool('noaa_marine_get_tide_predictio
   errors: [
     {
       reason: 'station_not_found',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.NotFound,
       when: 'CO-OPS returned an error for the station ID — likely wrong type or invalid ID.',
       recovery:
         'Use noaa_marine_find_stations with types=["tide"] to obtain a valid tide station ID.',
     },
     {
       reason: 'date_range_exceeded',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       when: 'Requested date range exceeds the 1-year CO-OPS limit.',
       recovery: 'Split the request into multiple calls each spanning at most 1 year.',
     },

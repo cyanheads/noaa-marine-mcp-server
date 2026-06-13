@@ -130,7 +130,7 @@ describe('noaaMarineGetCurrents', () => {
       end_date: '20250101',
     });
     await expect(noaaMarineGetCurrents.handler(input, ctx)).rejects.toMatchObject({
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       data: { reason: 'date_range_exceeded' },
     });
   });
@@ -153,7 +153,7 @@ describe('noaaMarineGetCurrents', () => {
       end_date: '20250115',
     });
     await expect(noaaMarineGetCurrents.handler(input, ctx)).rejects.toMatchObject({
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.NotFound,
       data: { reason: 'station_not_found' },
     });
   });
@@ -218,7 +218,7 @@ describe('noaaMarineGetCurrents', () => {
       end_date: '20250115',
     });
     await expect(noaaMarineGetCurrents.handler(input, ctx)).rejects.toMatchObject({
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.NotFound,
       data: { reason: 'station_not_found' },
     });
   });

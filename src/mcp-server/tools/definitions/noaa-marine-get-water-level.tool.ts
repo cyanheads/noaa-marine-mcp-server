@@ -117,14 +117,14 @@ export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
   errors: [
     {
       reason: 'station_not_found',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.NotFound,
       when: 'CO-OPS returned an error for the station ID.',
       recovery:
         'Use noaa_marine_find_stations with types=["water_level"] to obtain a valid station ID.',
     },
     {
       reason: 'date_range_exceeded',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       when: 'Requested date range exceeds the 31-day CO-OPS limit for 6-minute water level data.',
       recovery: 'Split the request into multiple calls each spanning at most 31 days.',
     },

@@ -72,7 +72,7 @@ describe('noaaMarineGetTidePredictions', () => {
       end_date: '20250101',
     });
     await expect(noaaMarineGetTidePredictions.handler(input, ctx)).rejects.toMatchObject({
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       data: { reason: 'date_range_exceeded' },
     });
   });
@@ -95,7 +95,7 @@ describe('noaaMarineGetTidePredictions', () => {
       end_date: '20250115',
     });
     await expect(noaaMarineGetTidePredictions.handler(input, ctx)).rejects.toMatchObject({
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.NotFound,
       data: { reason: 'station_not_found' },
     });
   });
@@ -158,7 +158,7 @@ describe('noaaMarineGetTidePredictions', () => {
       end_date: '20250115',
     });
     await expect(noaaMarineGetTidePredictions.handler(input, ctx)).rejects.toMatchObject({
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.NotFound,
       data: { reason: 'station_not_found' },
     });
   });

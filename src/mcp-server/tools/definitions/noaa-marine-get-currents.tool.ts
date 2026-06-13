@@ -107,14 +107,14 @@ export const noaaMarineGetCurrents = tool('noaa_marine_get_currents', {
   errors: [
     {
       reason: 'station_not_found',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.NotFound,
       when: 'CO-OPS returned an error for the station ID — current stations require alphanumeric IDs.',
       recovery:
         'Use noaa_marine_find_stations with types=["current"] to obtain a valid current station ID like ACT4176.',
     },
     {
       reason: 'date_range_exceeded',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       when: 'Requested date range exceeds the 1-year CO-OPS limit.',
       recovery: 'Split the request into multiple calls each spanning at most 1 year.',
     },

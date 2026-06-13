@@ -68,7 +68,7 @@ describe('noaaMarineGetWaterLevel', () => {
       end_date: '20250301',
     });
     await expect(noaaMarineGetWaterLevel.handler(input, ctx)).rejects.toMatchObject({
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       data: { reason: 'date_range_exceeded' },
     });
   });
@@ -88,7 +88,7 @@ describe('noaaMarineGetWaterLevel', () => {
       end_date: '20250115',
     });
     await expect(noaaMarineGetWaterLevel.handler(input, ctx)).rejects.toMatchObject({
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.NotFound,
       data: { reason: 'station_not_found' },
     });
   });
