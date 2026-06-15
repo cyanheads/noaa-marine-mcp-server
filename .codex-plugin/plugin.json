@@ -1,25 +1,25 @@
 {
-  "name": "noaa-marine-mcp-server",
+  "name": "@cyanheads/noaa-marine-mcp-server",
   "version": "0.1.4",
-  "description": "",
+  "description": "Find NOAA tide stations and NDBC buoys, fetch tide predictions, water levels, tidal currents, and live buoy conditions via MCP. STDIO or Streamable HTTP.",
   "author": {
-    "name": "",
-    "email": "",
-    "url": ""
+    "name": "cyanheads",
+    "email": "casey@caseyjhand.com",
+    "url": "https://github.com/cyanheads"
   },
-  "homepage": "",
-  "repository": "",
+  "homepage": "https://github.com/cyanheads/noaa-marine-mcp-server#readme",
+  "repository": "git+https://github.com/cyanheads/noaa-marine-mcp-server.git",
   "license": "Apache-2.0",
-  "keywords": ["mcp", "mcp-server", "model-context-protocol"],
+  "keywords": ["noaa", "marine", "tides", "ndbc", "buoy", "co-ops", "water-level", "currents", "coastal", "mcp", "mcp-server", "model-context-protocol", "typescript", "bun", "stdio", "streamable-http", "ai-agent"],
   "mcpServers": "./.codex-plugin/mcp.json",
   "interface": {
     "displayName": "noaa-marine-mcp-server",
-    "shortDescription": "",
-    "longDescription": "",
-    "developerName": "",
-    "category": "",
+    "shortDescription": "Find NOAA tide stations and NDBC buoys, fetch tide predictions, water levels, tidal currents, and live buoy conditions via MCP.",
+    "longDescription": "Fetch US marine conditions from NOAA CO-OPS and NDBC. Supports tide predictions, observed water levels and storm surge, tidal currents, and live buoy conditions including waves, wind, and sea-surface temperature. Deployable as stdio or streamable HTTP.",
+    "developerName": "cyanheads",
+    "category": "weather",
     "capabilities": ["Read"],
-    "websiteURL": "",
+    "websiteURL": "https://github.com/cyanheads/noaa-marine-mcp-server",
     "defaultPrompt": []
   }
 }
