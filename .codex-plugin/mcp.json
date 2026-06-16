@@ -1,5 +1,5 @@
 {
-  "@cyanheads/noaa-marine-mcp-server": {
+  "noaa-marine-mcp-server": {
     "command": "npx",
     "args": ["-y", "@cyanheads/noaa-marine-mcp-server"],
     "env": {
