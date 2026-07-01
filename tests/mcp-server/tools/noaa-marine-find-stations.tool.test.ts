@@ -82,6 +82,52 @@ describe('noaaMarineFindStations', () => {
     expect(result.stations[0]!.station_id).toBe('46041');
   });
 
+  it('excludes NDBC buoys when a state filter is set and source=all', async () => {
+    const ctx = createMockContext({ errors: noaaMarineFindStations.errors });
+
+    const { getCoopsService } = await import('@/services/coops/coops-service.js');
+    const { getNdbcService } = await import('@/services/ndbc/ndbc-service.js');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    initCoopsService(null as any, null as any, { applicationId: 'test' });
+    initNdbcService();
+
+    vi.spyOn(getCoopsService(), 'getStations').mockImplementation(async (type) =>
+      type === 'tidepredictions' ? [COOPS_TIDE_STATION] : [],
+    );
+    const ndbcSpy = vi.spyOn(getNdbcService(), 'getActiveStations').mockResolvedValue([NDBC_BUOY]);
+
+    const input = noaaMarineFindStations.input.parse({ state: 'WA', source: 'all', limit: 20 });
+    const result = await noaaMarineFindStations.handler(input, ctx);
+
+    // Only the WA CO-OPS station — no state-less NDBC buoys leak in.
+    expect(result.stations.every((s) => s.source === 'coops')).toBe(true);
+    expect(result.stations.some((s) => s.source === 'ndbc')).toBe(false);
+    expect(result.stations[0]!.station_id).toBe('9447130');
+    // NDBC list is not even fetched when a state filter is present.
+    expect(ndbcSpy).not.toHaveBeenCalled();
+  });
+
+  it('includes NDBC buoys with source=all when no state filter is set', async () => {
+    const ctx = createMockContext({ errors: noaaMarineFindStations.errors });
+
+    const { getCoopsService } = await import('@/services/coops/coops-service.js');
+    const { getNdbcService } = await import('@/services/ndbc/ndbc-service.js');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    initCoopsService(null as any, null as any, { applicationId: 'test' });
+    initNdbcService();
+
+    vi.spyOn(getCoopsService(), 'getStations').mockImplementation(async (type) =>
+      type === 'tidepredictions' ? [COOPS_TIDE_STATION] : [],
+    );
+    vi.spyOn(getNdbcService(), 'getActiveStations').mockResolvedValue([NDBC_BUOY]);
+
+    const input = noaaMarineFindStations.input.parse({ source: 'all', limit: 20 });
+    const result = await noaaMarineFindStations.handler(input, ctx);
+
+    expect(result.stations.some((s) => s.source === 'ndbc')).toBe(true);
+    expect(result.stations.some((s) => s.source === 'coops')).toBe(true);
+  });
+
   it('throws ctx.fail("no_results") when nothing matches', async () => {
     const ctx = createMockContext({ errors: noaaMarineFindStations.errors });
 

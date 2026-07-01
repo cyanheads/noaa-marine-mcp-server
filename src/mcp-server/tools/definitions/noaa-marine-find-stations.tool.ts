@@ -126,7 +126,9 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
       .enum(STATE_CODES)
       .optional()
       .describe(
-        'Filter by 2-letter US state or territory code (CO-OPS stations only). E.g. "WA", "CA", "PR".',
+        'Filter by 2-letter US state or territory code. Applies to CO-OPS stations only — ' +
+          'providing it restricts results to CO-OPS and excludes NDBC buoys (which carry no state). ' +
+          'E.g. "WA", "CA", "PR".',
       ),
     source: z
       .enum(['coops', 'ndbc', 'all'])
@@ -232,9 +234,11 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
     const lon = input.longitude;
     const hasLatLon = lat !== undefined && lat !== null && lon !== undefined && lon !== null;
 
-    // Fetch CO-OPS and NDBC lists in parallel
+    // Fetch CO-OPS and NDBC lists in parallel.
+    // `state` is a CO-OPS-only filter — NDBC buoys carry no state, so a state-scoped
+    // search must exclude them (otherwise state-less global buoys flood the results).
     const includeCoops = input.source === 'all' || input.source === 'coops';
-    const includeNdbc = input.source === 'all' || input.source === 'ndbc';
+    const includeNdbc = (input.source === 'all' || input.source === 'ndbc') && !input.state;
 
     const [coopsResults, ndbcResult] = await Promise.allSettled([
       includeCoops
