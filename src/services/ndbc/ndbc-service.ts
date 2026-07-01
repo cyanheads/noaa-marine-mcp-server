@@ -118,7 +118,9 @@ export class NdbcService {
       const stationOwner = get('owner');
       stations.push({
         id: id.toUpperCase(),
-        name: name ?? id,
+        // NDBC ships some rows with name="" (or whitespace-only); normalize to an
+        // `NDBC <ID>` label so blank names don't sort first or render empty downstream.
+        name: name?.trim() || `NDBC ${id.toUpperCase()}`,
         lat: latNum,
         lon: lonNum,
         ...(stationType !== undefined && { type: stationType }),

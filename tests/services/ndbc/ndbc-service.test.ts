@@ -199,4 +199,24 @@ describe('NdbcService.parseActiveStationsXml', () => {
     const stations = parseXml(xml);
     expect(stations[0]).toMatchObject({ type: 'buoy', owner: 'NOAA' });
   });
+
+  it('normalizes an empty name to an NDBC <ID> label', () => {
+    const xml = `<ActiveStations><Station ID="14041" lat="-8.0" lon="55.0" name="" met="y" currents="n"/></ActiveStations>`;
+    const stations = parseXml(xml);
+    expect(stations[0]!.name).toBe('NDBC 14041');
+  });
+
+  it('normalizes a whitespace-only name to an NDBC <ID> label (uppercased ID)', () => {
+    const xml = `<ActiveStations><Station ID="ab12" lat="10.0" lon="-20.0" name="   " met="n" currents="n"/></ActiveStations>`;
+    const stations = parseXml(xml);
+    // ID is uppercased on the record, and the fallback label matches it.
+    expect(stations[0]!.id).toBe('AB12');
+    expect(stations[0]!.name).toBe('NDBC AB12');
+  });
+
+  it('leaves a populated name untouched', () => {
+    const xml = `<ActiveStations><Station ID="46041" lat="50.1" lon="-145.82" name="Cape Elizabeth" met="y" currents="n"/></ActiveStations>`;
+    const stations = parseXml(xml);
+    expect(stations[0]!.name).toBe('Cape Elizabeth');
+  });
 });
