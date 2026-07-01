@@ -127,6 +127,47 @@ describe('noaaMarineGetConditions', () => {
     });
   });
 
+  it('preserves no_sensor_data when the buoy file exists but all sensors are missing', async () => {
+    const ctx = createMockContext({ errors: noaaMarineGetConditions.errors });
+
+    const { getNdbcService } = await import('@/services/ndbc/ndbc-service.js');
+    const svc = getNdbcService();
+    vi.spyOn(svc, 'getActiveStations').mockResolvedValue([]);
+
+    const { notFound } = await import('@cyanheads/mcp-ts-core/errors');
+    // Service-level notFound for an existing-but-empty file carries reason: 'no_sensor_data'.
+    vi.spyOn(svc, 'fetchObservation').mockRejectedValue(
+      notFound('NDBC buoy TEST1 has all sensor fields missing — buoy offline or sensor failure.', {
+        stationId: 'TEST1',
+        reason: 'no_sensor_data',
+      }),
+    );
+
+    const input = noaaMarineGetConditions.input.parse({ station_id: 'TEST1' });
+    await expect(noaaMarineGetConditions.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: { reason: 'no_sensor_data' },
+    });
+  });
+
+  it('maps a bare NotFound 404 (no reason) to buoy_not_found', async () => {
+    const ctx = createMockContext({ errors: noaaMarineGetConditions.errors });
+
+    const { getNdbcService } = await import('@/services/ndbc/ndbc-service.js');
+    const svc = getNdbcService();
+    vi.spyOn(svc, 'getActiveStations').mockResolvedValue([]);
+
+    const { notFound } = await import('@cyanheads/mcp-ts-core/errors');
+    // fetchWithTimeout throws a 404 before the service's own check runs: statusCode, no reason.
+    vi.spyOn(svc, 'fetchObservation').mockRejectedValue(notFound('HTTP 404', { statusCode: 404 }));
+
+    const input = noaaMarineGetConditions.input.parse({ station_id: 'ZZZZZ' });
+    await expect(noaaMarineGetConditions.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: { reason: 'buoy_not_found' },
+    });
+  });
+
   it('falls back to station_id as name when station not found in active list', async () => {
     const ctx = createMockContext({ errors: noaaMarineGetConditions.errors });
 

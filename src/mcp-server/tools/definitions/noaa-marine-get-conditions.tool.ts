@@ -113,15 +113,24 @@ export const noaaMarineGetConditions = tool('noaa_marine_get_conditions', {
     try {
       obs = await ndbcSvc.fetchObservation(input.station_id, ctx);
     } catch (err) {
-      // fetchWithTimeout intercepts 404 before our notFound() check in the service runs.
-      // Re-classify as the typed contract reason so data.reason is populated.
+      // Both a genuine missing buoy and an offline/sensor-failure buoy surface as
+      // code NotFound: fetchWithTimeout throws a bare 404 (data.statusCode: 404, no
+      // reason) before the service's own check runs, while the service's notFound()
+      // for an existing-but-empty file carries data.reason: 'no_sensor_data'. Inspect
+      // the reason so a sensorless buoy isn't mislabeled as an invalid station ID.
       if (err instanceof McpError && err.code === JsonRpcErrorCode.NotFound) {
+        const reason = (err.data as Record<string, unknown> | undefined)?.reason;
+        if (reason === 'no_sensor_data') {
+          throw ctx.fail(
+            'no_sensor_data',
+            `NDBC buoy ${input.station_id} reported no usable sensor data — the buoy file exists but every sensor value is missing (buoy offline or sensor failure).`,
+            { ...ctx.recoveryFor('no_sensor_data') },
+          );
+        }
         throw ctx.fail(
           'buoy_not_found',
           `NDBC buoy ${input.station_id} not found — verify the ID with noaa_marine_find_stations.`,
-          {
-            ...ctx.recoveryFor('buoy_not_found'),
-          },
+          { ...ctx.recoveryFor('buoy_not_found') },
         );
       }
       throw err;
