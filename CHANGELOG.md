@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.6](changelog/0.1.x/0.1.6.md) — 2026-06-30
+
+Four bug fixes: CO-OPS invalid/reversed date ranges validate locally as invalid_date_range instead of station_not_found, sensorless buoys keep no_sensor_data, a state filter excludes state-less NDBC buoys, and blank NDBC names become NDBC <id> labels; dev-dependency refresh
+
 ## [0.1.5](changelog/0.1.x/0.1.5.md) — 2026-06-20
 
 mcp-ts-core ^0.10.9 maintenance — check-dependency-specifiers devcheck step, plugin-manifest packaging checks, fresh-scaffold devcheck guards, ctx.content collector available; dev-dependency refresh
