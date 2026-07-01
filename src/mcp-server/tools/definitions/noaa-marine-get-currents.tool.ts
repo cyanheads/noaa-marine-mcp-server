@@ -6,10 +6,7 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { getCoopsService, isCoopsBodyError } from '@/services/coops/coops-service.js';
-
-function parseDateStr(s: string): Date {
-  return new Date(`${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}T00:00:00Z`);
-}
+import { validateCoopsDateRange } from '@/services/coops/date-range.js';
 
 export const noaaMarineGetCurrents = tool('noaa_marine_get_currents', {
   title: 'Get Tidal Currents',
@@ -113,6 +110,13 @@ export const noaaMarineGetCurrents = tool('noaa_marine_get_currents', {
         'Use noaa_marine_find_stations with types=["current"] to obtain a valid current station ID like ACT4176.',
     },
     {
+      reason: 'invalid_date_range',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'begin_date/end_date is not a real calendar date or begin_date is after end_date',
+      recovery:
+        'Provide begin_date and end_date as real YYYYMMDD calendar dates with begin_date on or before end_date.',
+    },
+    {
       reason: 'date_range_exceeded',
       code: JsonRpcErrorCode.ValidationError,
       when: 'Requested date range exceeds the 1-year CO-OPS limit.',
@@ -128,13 +132,18 @@ export const noaaMarineGetCurrents = tool('noaa_marine_get_currents', {
   ],
 
   async handler(input, ctx) {
-    const begin = parseDateStr(input.begin_date);
-    const end = parseDateStr(input.end_date);
-    const diffDays = (end.getTime() - begin.getTime()) / (1000 * 60 * 60 * 24);
-    if (diffDays > 365) {
+    // Validate dates locally before calling CO-OPS — impossible calendar dates and
+    // reversed ranges would otherwise return an HTTP 400 that reads as station_not_found.
+    const range = validateCoopsDateRange(input.begin_date, input.end_date);
+    if (!range.ok) {
+      throw ctx.fail('invalid_date_range', range.error, {
+        ...ctx.recoveryFor('invalid_date_range'),
+      });
+    }
+    if (range.spanDays > 365) {
       throw ctx.fail(
         'date_range_exceeded',
-        `Date range of ${Math.ceil(diffDays)} days exceeds the 1-year limit.`,
+        `Date range of ${Math.ceil(range.spanDays)} days exceeds the 1-year limit.`,
         { ...ctx.recoveryFor('date_range_exceeded') },
       );
     }

@@ -6,10 +6,7 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { getCoopsService, isCoopsBodyError } from '@/services/coops/coops-service.js';
-
-function parseDateStr(s: string): Date {
-  return new Date(`${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}T00:00:00Z`);
-}
+import { validateCoopsDateRange } from '@/services/coops/date-range.js';
 
 export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
   title: 'Get Water Level',
@@ -123,6 +120,13 @@ export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
         'Use noaa_marine_find_stations with types=["water_level"] to obtain a valid station ID.',
     },
     {
+      reason: 'invalid_date_range',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'begin_date/end_date is not a real calendar date or begin_date is after end_date',
+      recovery:
+        'Provide begin_date and end_date as real YYYYMMDD calendar dates with begin_date on or before end_date.',
+    },
+    {
       reason: 'date_range_exceeded',
       code: JsonRpcErrorCode.ValidationError,
       when: 'Requested date range exceeds the 31-day CO-OPS limit for 6-minute water level data.',
@@ -138,14 +142,18 @@ export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
   ],
 
   async handler(input, ctx) {
-    // Validate date range ≤ 31 days
-    const begin = parseDateStr(input.begin_date);
-    const end = parseDateStr(input.end_date);
-    const diffDays = (end.getTime() - begin.getTime()) / (1000 * 60 * 60 * 24);
-    if (diffDays > 31) {
+    // Validate dates locally before calling CO-OPS — impossible calendar dates and
+    // reversed ranges would otherwise return an HTTP 400 that reads as station_not_found.
+    const range = validateCoopsDateRange(input.begin_date, input.end_date);
+    if (!range.ok) {
+      throw ctx.fail('invalid_date_range', range.error, {
+        ...ctx.recoveryFor('invalid_date_range'),
+      });
+    }
+    if (range.spanDays > 31) {
       throw ctx.fail(
         'date_range_exceeded',
-        `Date range of ${Math.ceil(diffDays)} days exceeds the 31-day limit for 6-minute water level data.`,
+        `Date range of ${Math.ceil(range.spanDays)} days exceeds the 31-day limit for 6-minute water level data.`,
         { ...ctx.recoveryFor('date_range_exceeded') },
       );
     }

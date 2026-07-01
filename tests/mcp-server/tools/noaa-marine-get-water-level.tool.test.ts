@@ -73,6 +73,48 @@ describe('noaaMarineGetWaterLevel', () => {
     });
   });
 
+  it('throws ctx.fail("invalid_date_range") for an impossible calendar date, without calling CO-OPS', async () => {
+    const ctx = createMockContext({ errors: noaaMarineGetWaterLevel.errors });
+
+    const { getCoopsService } = await import('@/services/coops/coops-service.js');
+    const svc = getCoopsService();
+    const fetchSpy = vi
+      .spyOn(svc, 'fetchWaterLevel')
+      .mockResolvedValue({ data: [], stationName: 'x' });
+
+    const input = noaaMarineGetWaterLevel.input.parse({
+      station_id: '9447130',
+      begin_date: '20250231', // Feb 31 — does not exist
+      end_date: '20250302',
+    });
+    await expect(noaaMarineGetWaterLevel.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'invalid_date_range' },
+    });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('throws ctx.fail("invalid_date_range") for a reversed range, without calling CO-OPS', async () => {
+    const ctx = createMockContext({ errors: noaaMarineGetWaterLevel.errors });
+
+    const { getCoopsService } = await import('@/services/coops/coops-service.js');
+    const svc = getCoopsService();
+    const fetchSpy = vi
+      .spyOn(svc, 'fetchWaterLevel')
+      .mockResolvedValue({ data: [], stationName: 'x' });
+
+    const input = noaaMarineGetWaterLevel.input.parse({
+      station_id: '9447130',
+      begin_date: '20250310',
+      end_date: '20250301', // before begin_date
+    });
+    await expect(noaaMarineGetWaterLevel.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'invalid_date_range' },
+    });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
   it('throws ctx.fail("station_not_found") on CO-OPS station error', async () => {
     const ctx = createMockContext({ errors: noaaMarineGetWaterLevel.errors });
 
