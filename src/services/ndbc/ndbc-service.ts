@@ -6,13 +6,22 @@
 import type { Context } from '@cyanheads/mcp-ts-core';
 import { notFound, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import { fetchWithTimeout, type RequestContext, withRetry } from '@cyanheads/mcp-ts-core/utils';
-import type { NdbcCurrentBin, NdbcCurrentProfile, NdbcObservation, NdbcStation } from './types.js';
+import type {
+  NdbcCurrentBin,
+  NdbcCurrentProfile,
+  NdbcObservation,
+  NdbcOceanObservation,
+  NdbcOceanReading,
+  NdbcStation,
+} from './types.js';
 
 const ACTIVE_STATIONS_URL = 'https://www.ndbc.noaa.gov/activestations.xml';
 const REALTIME_URL = (id: string) =>
   `https://www.ndbc.noaa.gov/data/realtime2/${id.toUpperCase()}.txt`;
 const ADCP_URL = (id: string) =>
   `https://www.ndbc.noaa.gov/data/realtime2/${id.toUpperCase()}.adcp`;
+const OCEAN_URL = (id: string) =>
+  `https://www.ndbc.noaa.gov/data/realtime2/${id.toUpperCase()}.ocean`;
 const CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
 
 interface StationCache {
@@ -114,6 +123,32 @@ export class NdbcService {
     );
   }
 
+  /** Fetch and parse the latest oceanographic observation for a station from the realtime2 `.ocean` feed. */
+  async fetchOceanObservations(stationId: string, ctx: Context): Promise<NdbcOceanObservation> {
+    return await withRetry(
+      async () => {
+        const url = OCEAN_URL(stationId);
+        const response = await fetchWithTimeout(url, 10_000, ctx as unknown as RequestContext, {
+          signal: ctx.signal,
+        });
+
+        const text = await response.text();
+        if (/^\s*<(!DOCTYPE\s+html|html[\s>])/i.test(text)) {
+          throw serviceUnavailable('NDBC ocean endpoint returned HTML — likely rate-limited.');
+        }
+
+        return this.parseOceanText(text, stationId);
+      },
+      {
+        operation: `NdbcService.fetchOceanObservations(${stationId})`,
+        context: ctx as unknown as RequestContext,
+        baseDelayMs: 1000,
+        maxRetries: 2,
+        signal: ctx.signal,
+      },
+    );
+  }
+
   /**
    * Parse an NDBC ADCP (`.adcp`) realtime file into the most recent current profile.
    * Layout: two `#`-prefixed header lines (`#YY MM DD hh mm DEP01 DIR01 SPD01 …`,
@@ -187,6 +222,96 @@ export class NdbcService {
         : new Date().toISOString();
 
     return { observedAt, bins };
+  }
+
+  /**
+   * Parse an NDBC oceanographic (`.ocean`) realtime file into the most recent observation.
+   * Layout: two `#`-prefixed header lines
+   * (`#YY MM DD hh mm DEPTH OTMP COND SAL O2% O2PPM CLCON TURB PH EH`, then a units line),
+   * followed by data rows most-recent-first. Columns are fixed-position: five time columns,
+   * then depth (m) and the nine water-column sensors. A station reports one row per depth, so
+   * a single timestamp can carry several rows — the latest observation is every row that shares
+   * the first (most recent) row's timestamp. Any sensor token may be the literal `MM`
+   * (missing → null); a reading is emitted only when its depth is present to anchor it.
+   */
+  parseOceanText(text: string, stationId: string): NdbcOceanObservation {
+    const lines = text
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean);
+
+    if (!lines.some((l) => l.startsWith('#'))) {
+      throw serviceUnavailable(`NDBC ocean file for ${stationId} has no header row.`);
+    }
+
+    const dataLines = lines.filter((l) => !l.startsWith('#'));
+    const firstDataLine = dataLines[0];
+    if (firstDataLine === undefined) {
+      throw notFound(
+        `NDBC station ${stationId} has no oceanographic data rows — station may be offline.`,
+        { stationId, reason: 'no_ocean_data' },
+      );
+    }
+
+    // A token that is absent or the literal `MM` (NDBC's missing marker) becomes null.
+    const parseValue = (tok: string | undefined): number | null => {
+      if (tok === undefined || tok === 'MM') return null;
+      const n = Number.parseFloat(tok);
+      return Number.isNaN(n) ? null : n;
+    };
+
+    // Rows are reverse-chronological, so the first data row is the latest observation. Its five
+    // time columns key that observation; collect every row sharing them, since a station reporting
+    // multiple depths emits one row per depth at the same timestamp. Older observations sort after,
+    // so stopping at the first differing timestamp captures exactly the latest observation.
+    const firstTokens = firstDataLine.split(/\s+/);
+    const timeKey = firstTokens.slice(0, 5).join(' ');
+
+    const readings: NdbcOceanReading[] = [];
+    for (const line of dataLines) {
+      const tokens = line.split(/\s+/);
+      if (tokens.slice(0, 5).join(' ') !== timeKey) break;
+
+      // Column index 5 is depth; a reading needs a real depth to anchor it (mirrors parseAdcpText).
+      const depthTok = tokens[5];
+      if (depthTok === undefined || depthTok === 'MM') continue;
+      const depthM = Number.parseFloat(depthTok);
+      if (Number.isNaN(depthM)) continue;
+
+      readings.push({
+        depthM,
+        waterTempC: parseValue(tokens[6]),
+        conductivityMsCm: parseValue(tokens[7]),
+        salinityPsu: parseValue(tokens[8]),
+        oxygenPercent: parseValue(tokens[9]),
+        oxygenPpm: parseValue(tokens[10]),
+        chlorophyllUgL: parseValue(tokens[11]),
+        turbidityFtu: parseValue(tokens[12]),
+        ph: parseValue(tokens[13]),
+        redoxMv: parseValue(tokens[14]),
+      });
+    }
+
+    if (readings.length === 0) {
+      throw notFound(
+        `NDBC station ${stationId} reported no usable oceanographic readings — every depth row in the latest observation is missing (station offline or sensor failure).`,
+        { stationId, reason: 'no_ocean_data' },
+      );
+    }
+
+    // Build the ISO timestamp from the YY MM DD hh mm columns. NDBC emits 4-digit years in
+    // the YY column, so treat values ≥ 1000 as already-full years (mirrors parseAdcpText).
+    const [yy, mo, dd, hh, mn] = firstTokens;
+    const observedAt =
+      yy && mo && dd && hh && mn
+        ? (() => {
+            const n = Number.parseInt(yy, 10);
+            const year = n >= 1000 ? n : n < 50 ? 2000 + n : 1900 + n;
+            return `${year}-${mo.padStart(2, '0')}-${dd.padStart(2, '0')}T${hh.padStart(2, '0')}:${mn.padStart(2, '0')}:00Z`;
+          })()
+        : new Date().toISOString();
+
+    return { observedAt, readings };
   }
 
   /** Parse NDBC active stations XML into NdbcStation array. */

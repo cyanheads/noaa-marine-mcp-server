@@ -45,6 +45,48 @@ export interface NdbcCurrentProfile {
 }
 
 /**
+ * A single depth reading from an NDBC oceanographic (`.ocean`) file — the
+ * sub-surface water-column sensors at one measurement depth. Every sensor value
+ * is null when NDBC reported the literal `MM` for that column; only the depth is
+ * guaranteed, since a reading is emitted only when its depth is present to anchor it.
+ */
+export interface NdbcOceanReading {
+  /** Chlorophyll concentration µg/l (CLCON) — null if MM. */
+  chlorophyllUgL: number | null;
+  /** Conductivity mS/cm (COND) — null if MM. */
+  conductivityMsCm: number | null;
+  /** Measurement depth below the surface in meters (DEPTH). */
+  depthM: number;
+  /** Dissolved-oxygen saturation percent (O2%) — null if MM. */
+  oxygenPercent: number | null;
+  /** Dissolved-oxygen concentration ppm (O2PPM) — null if MM. */
+  oxygenPpm: number | null;
+  /** pH, dimensionless (PH) — null if MM. */
+  ph: number | null;
+  /** Oxidation-reduction (redox) potential mV (EH) — null if MM. */
+  redoxMv: number | null;
+  /** Salinity psu (SAL) — null if MM. */
+  salinityPsu: number | null;
+  /** Turbidity FTU (TURB) — null if MM. */
+  turbidityFtu: number | null;
+  /** Water temperature °C (OTMP) — null if MM. */
+  waterTempC: number | null;
+}
+
+/**
+ * Parsed NDBC oceanographic observation — the readings sharing the most recent
+ * timestamp in an `<ID>.ocean` realtime file. A station usually reports one depth
+ * (a single reading), but some report several depths at the same time, so the
+ * latest observation is an ordered list of per-depth readings.
+ */
+export interface NdbcOceanObservation {
+  /** ISO 8601 UTC timestamp of the observation. */
+  observedAt: string;
+  /** Per-depth readings at the latest observation time, in NDBC source order. */
+  readings: NdbcOceanReading[];
+}
+
+/**
  * Parsed NDBC realtime observation.
  * All sensor fields are null when the buoy did not report a value (MM in source).
  */

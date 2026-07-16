@@ -287,3 +287,111 @@ describe('NdbcService.parseAdcpText', () => {
     );
   });
 });
+
+describe('NdbcService.parseOceanText', () => {
+  let svc: NdbcService;
+
+  beforeEach(() => {
+    svc = makeService();
+  });
+
+  // Real two-line `.ocean` header (column names + units). The parser keys off the leading `#`,
+  // then reads data rows positionally: five time columns, depth (m), then nine sensor columns.
+  const OCEAN_HEADER =
+    '#YY  MM DD hh mm   DEPTH  OTMP   COND   SAL   O2% O2PPM  CLCON  TURB    PH    EH\n' +
+    '#yr  mo dy hr mn       m  degC  mS/cm   psu     %   ppm   ug/l   FTU     -    mv\n';
+
+  it('parses the latest single-depth row, nulling MM sensors (44033 shape)', () => {
+    // 44033 populates only water temp (OTMP) and salinity (SAL); every other sensor is MM.
+    const text =
+      OCEAN_HEADER +
+      '2026 07 15 19 00     1.0 12.34    MM 31.21    MM    MM     MM    MM    MM    MM\n' +
+      '2026 07 15 18 00     1.0 11.85    MM 31.22    MM    MM     MM    MM    MM    MM\n';
+    const obs = svc.parseOceanText(text, '44033');
+
+    // Reverse-chronological: the first data row is the most recent observation.
+    expect(obs.observedAt).toBe('2026-07-15T19:00:00Z');
+    expect(obs.readings).toHaveLength(1);
+    expect(obs.readings[0]).toEqual({
+      depthM: 1.0,
+      waterTempC: 12.34,
+      conductivityMsCm: null,
+      salinityPsu: 31.21,
+      oxygenPercent: null,
+      oxygenPpm: null,
+      chlorophyllUgL: null,
+      turbidityFtu: null,
+      ph: null,
+      redoxMv: null,
+    });
+  });
+
+  it('parses a fully-populated row across every sensor column (TIBC1 shape)', () => {
+    // TIBC1 reports temp, salinity, dissolved oxygen (both), chlorophyll, turbidity, and pH;
+    // conductivity (COND) and redox (EH) are MM — proving each column maps to the right field.
+    const text = `${OCEAN_HEADER}2026 07 16 09 30     0.0 15.68    MM 31.24  65.8  5.41   2.30   112  7.99    MM\n`;
+    const obs = svc.parseOceanText(text, 'TIBC1');
+
+    expect(obs.readings).toHaveLength(1);
+    expect(obs.readings[0]).toEqual({
+      depthM: 0.0,
+      waterTempC: 15.68,
+      conductivityMsCm: null,
+      salinityPsu: 31.24,
+      oxygenPercent: 65.8,
+      oxygenPpm: 5.41,
+      chlorophyllUgL: 2.3,
+      turbidityFtu: 112,
+      ph: 7.99,
+      redoxMv: null,
+    });
+  });
+
+  it('groups every depth sharing the latest timestamp and excludes older rows (42022 shape)', () => {
+    // 42022 reports two depths (1.0 m and 0.0 m) at each observation time; the latest
+    // observation is both rows at 08:35, and the earlier 08:05 rows must not leak in.
+    const text =
+      OCEAN_HEADER +
+      '2026 07 16 08 35     1.0 30.81    MM 36.73    MM    MM     MM    MM    MM    MM\n' +
+      '2026 07 16 08 35     0.0 30.80    MM 36.70    MM    MM     MM    MM    MM    MM\n' +
+      '2026 07 16 08 05     1.0 30.83    MM 36.78    MM    MM     MM    MM    MM    MM\n' +
+      '2026 07 16 08 05     0.0 30.83    MM 36.78    MM    MM     MM    MM    MM    MM\n';
+    const obs = svc.parseOceanText(text, '42022');
+
+    expect(obs.observedAt).toBe('2026-07-16T08:35:00Z');
+    expect(obs.readings).toHaveLength(2);
+    expect(obs.readings.map((r) => r.depthM)).toEqual([1.0, 0.0]);
+    expect(obs.readings[0]!.waterTempC).toBe(30.81);
+    expect(obs.readings[1]!.waterTempC).toBe(30.8);
+    expect(obs.readings[1]!.salinityPsu).toBe(36.7);
+  });
+
+  it('throws no_ocean_data when the file has a header but no data rows', () => {
+    let caught: unknown;
+    try {
+      svc.parseOceanText(OCEAN_HEADER, 'EMPTY');
+    } catch (err) {
+      caught = err;
+    }
+    expect((caught as Error).message).toMatch(/no oceanographic data rows/i);
+    expect((caught as { data?: { reason?: string } }).data?.reason).toBe('no_ocean_data');
+  });
+
+  it('throws no_ocean_data when the latest row has no anchoring depth (MM depth)', () => {
+    const text = `${OCEAN_HEADER}2026 07 16 09 00      MM 12.34    MM 31.21    MM    MM     MM    MM    MM    MM\n`;
+    let caught: unknown;
+    try {
+      svc.parseOceanText(text, 'NODEPTH');
+    } catch (err) {
+      caught = err;
+    }
+    expect((caught as Error).message).toMatch(/no usable oceanographic readings/i);
+    expect((caught as { data?: { reason?: string } }).data?.reason).toBe('no_ocean_data');
+  });
+
+  it('throws ServiceUnavailable when there is no header row', () => {
+    expect(() =>
+      svc.parseOceanText('2026 07 16 09 00 1.0 12.34 MM 31.21 MM MM MM MM MM MM\n', 'NOHDR'),
+    ).toThrow(/no header row/i);
+  });
+});
