@@ -20,6 +20,31 @@ export interface NdbcStation {
 }
 
 /**
+ * A single depth bin from an NDBC ADCP (`.adcp`) current profile.
+ * Direction and speed are null when NDBC reported the literal `MM` for that
+ * component; a bin is only emitted when its depth is present to anchor it.
+ */
+export interface NdbcCurrentBin {
+  /** Bin depth below the surface in meters. */
+  depthM: number;
+  /** Direction the current flows toward, degrees true (0–360) — null if MM. */
+  directionDeg: number | null;
+  /** Current speed in cm/s — null if MM. */
+  speedCmS: number | null;
+}
+
+/**
+ * Parsed NDBC ADCP current profile — the most recent observation row from an
+ * `<ID>.adcp` realtime file, resolved into an ordered list of depth bins.
+ */
+export interface NdbcCurrentProfile {
+  /** Depth-binned current measurements, shallowest first (NDBC source order). */
+  bins: NdbcCurrentBin[];
+  /** ISO 8601 UTC timestamp of the observation row. */
+  observedAt: string;
+}
+
+/**
  * Parsed NDBC realtime observation.
  * All sensor fields are null when the buoy did not report a value (MM in source).
  */

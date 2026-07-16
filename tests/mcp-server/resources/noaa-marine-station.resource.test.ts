@@ -30,6 +30,28 @@ const NDBC_BUOY = {
   owner: 'NOAA',
 };
 
+/** A fixed platform reporting no data capability — platform class is its only identity. */
+const NDBC_FIXED_PLATFORM = {
+  id: 'SANF1',
+  name: 'Sand Key, FL',
+  lat: 24.45,
+  lon: -81.88,
+  hasMet: false,
+  hasCurrents: false,
+  type: 'fixed',
+};
+
+/** A currents-capable NDBC buoy — exercises the current_profile capability. */
+const NDBC_CURRENTS = {
+  id: '44033',
+  name: 'Buoy F01 - Penobscot Bay',
+  lat: 44.05,
+  lon: -68.11,
+  hasMet: false,
+  hasCurrents: true,
+  type: 'buoy',
+};
+
 function setupServices() {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   initCoopsService(null as any, null as any, { applicationId: 'test' });
@@ -54,7 +76,10 @@ describe('noaaMarineStationResource', () => {
     vi.spyOn(getNdbcService(), 'getActiveStations').mockResolvedValue([]);
 
     const params = noaaMarineStationResource.params.parse({ station_id: '9447130' });
-    const result = await noaaMarineStationResource.handler(params, ctx);
+    const result = (await noaaMarineStationResource.handler(params, ctx)) as Record<
+      string,
+      unknown
+    >;
 
     expect(result).toMatchObject({
       station_id: '9447130',
@@ -63,9 +88,15 @@ describe('noaaMarineStationResource', () => {
       latitude: 47.6,
       longitude: -122.3,
     });
+    // #14: type is the primary DATA capability, matching find_stations — not the CO-OPS R/T/S
+    // catalog code ('R'), which is a different axis and is not surfaced.
+    expect(result.type).toBe('tide');
+    expect(result.capabilities).toEqual(['tide']);
+    // CO-OPS publishes no platform taxonomy.
+    expect(result).not.toHaveProperty('platform');
   });
 
-  it('returns NDBC buoy metadata for an NDBC station ID', async () => {
+  it('returns NDBC buoy metadata with platform class and capability-axis type', async () => {
     const ctx = createMockContext({ tenantId: 'test' });
 
     const { getCoopsService } = await import('@/services/coops/coops-service.js');
@@ -74,7 +105,10 @@ describe('noaaMarineStationResource', () => {
     vi.spyOn(getNdbcService(), 'getActiveStations').mockResolvedValue([NDBC_BUOY]);
 
     const params = noaaMarineStationResource.params.parse({ station_id: '46041' });
-    const result = await noaaMarineStationResource.handler(params, ctx);
+    const result = (await noaaMarineStationResource.handler(params, ctx)) as Record<
+      string,
+      unknown
+    >;
 
     expect(result).toMatchObject({
       station_id: '46041',
@@ -83,6 +117,10 @@ describe('noaaMarineStationResource', () => {
       latitude: 47.35,
       longitude: -124.73,
     });
+    // #14: platform class lives under `platform`; type is the data capability (same axis both surfaces).
+    expect(result.platform).toBe('buoy');
+    expect(result.type).toBe('met');
+    expect(result.capabilities).toEqual(['met']);
   });
 
   it('is case-insensitive for station ID lookup', async () => {
@@ -148,5 +186,45 @@ describe('noaaMarineStationResource', () => {
       unknown
     >;
     expect(result.owner).toBe('NOAA');
+  });
+
+  it('does not fabricate a buoy capability for a bare platform (#13)', async () => {
+    const ctx = createMockContext({ tenantId: 'test' });
+
+    const { getCoopsService } = await import('@/services/coops/coops-service.js');
+    const { getNdbcService } = await import('@/services/ndbc/ndbc-service.js');
+    vi.spyOn(getCoopsService(), 'getStations').mockResolvedValue([]);
+    vi.spyOn(getNdbcService(), 'getActiveStations').mockResolvedValue([NDBC_FIXED_PLATFORM]);
+
+    const params = noaaMarineStationResource.params.parse({ station_id: 'SANF1' });
+    const result = (await noaaMarineStationResource.handler(params, ctx)) as Record<
+      string,
+      unknown
+    >;
+
+    // The old fallback asserted capabilities:["buoy"] and type:"buoy" for a fixed platform.
+    expect(result.capabilities).toEqual([]);
+    expect(result).not.toHaveProperty('type');
+    // Platform class is reported honestly — a fixed platform, not a buoy.
+    expect(result.platform).toBe('fixed');
+  });
+
+  it('reports current_profile as the capability for an NDBC currents station', async () => {
+    const ctx = createMockContext({ tenantId: 'test' });
+
+    const { getCoopsService } = await import('@/services/coops/coops-service.js');
+    const { getNdbcService } = await import('@/services/ndbc/ndbc-service.js');
+    vi.spyOn(getCoopsService(), 'getStations').mockResolvedValue([]);
+    vi.spyOn(getNdbcService(), 'getActiveStations').mockResolvedValue([NDBC_CURRENTS]);
+
+    const params = noaaMarineStationResource.params.parse({ station_id: '44033' });
+    const result = (await noaaMarineStationResource.handler(params, ctx)) as Record<
+      string,
+      unknown
+    >;
+
+    expect(result.capabilities).toEqual(['current_profile']);
+    expect(result.type).toBe('current_profile');
+    expect(result.platform).toBe('buoy');
   });
 });

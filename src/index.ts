@@ -9,6 +9,7 @@ import { getServerConfig } from './config/server-config.js';
 import { noaaMarineStationResource } from './mcp-server/resources/definitions/noaa-marine-station.resource.js';
 import { noaaMarineFindStations } from './mcp-server/tools/definitions/noaa-marine-find-stations.tool.js';
 import { noaaMarineGetConditions } from './mcp-server/tools/definitions/noaa-marine-get-conditions.tool.js';
+import { noaaMarineGetCurrentProfile } from './mcp-server/tools/definitions/noaa-marine-get-current-profile.tool.js';
 import { noaaMarineGetCurrents } from './mcp-server/tools/definitions/noaa-marine-get-currents.tool.js';
 import { noaaMarineGetTidePredictions } from './mcp-server/tools/definitions/noaa-marine-get-tide-predictions.tool.js';
 import { noaaMarineGetWaterLevel } from './mcp-server/tools/definitions/noaa-marine-get-water-level.tool.js';
@@ -24,6 +25,7 @@ await createApp({
     noaaMarineGetWaterLevel,
     noaaMarineGetCurrents,
     noaaMarineGetConditions,
+    noaaMarineGetCurrentProfile,
   ],
   resources: [noaaMarineStationResource],
   prompts: [],
@@ -33,8 +35,11 @@ await createApp({
     'then call the appropriate data tool. ' +
     'CO-OPS provides tide predictions (noaa_marine_get_tide_predictions), ' +
     'observed water levels and storm surge (noaa_marine_get_water_level), ' +
-    'and tidal current predictions (noaa_marine_get_currents). ' +
-    'NDBC provides live buoy conditions — waves, wind, sea-surface temp (noaa_marine_get_conditions). ' +
+    'and tidal-current predictions (noaa_marine_get_currents). ' +
+    'NDBC provides live buoy conditions — waves, wind, sea-surface temp (noaa_marine_get_conditions) — ' +
+    'and observed ocean-current depth profiles (noaa_marine_get_current_profile). ' +
+    'The two current tools are distinct: get_currents is CO-OPS tidal-current predictions (forecast), ' +
+    'get_current_profile is NDBC observed depth-binned currents from an ADCP buoy. ' +
     'All water height data is referenced to MLLW by default (US nautical chart datum).',
 
   setup(core) {

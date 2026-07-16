@@ -12,6 +12,8 @@ export const noaaMarineGetCurrents = tool('noaa_marine_get_currents', {
   title: 'Get Tidal Currents',
   description:
     'Tidal current predictions for a CO-OPS current station: max flood/ebb speeds, slack times, and directions. ' +
+    'These are forecast tidal-current predictions from CO-OPS — distinct from noaa_marine_get_current_profile, which ' +
+    'returns NDBC observed ocean-current measurements binned by depth. ' +
     'Defaults to MAX_SLACK interval — the practical planning view showing when currents peak and when slack water occurs. ' +
     'Optionally returns 6-minute continuous predictions for detailed analysis. ' +
     'Current station IDs use alphanumeric format (e.g. ACT4176), distinct from numeric tide/water-level IDs. ' +

@@ -6,11 +6,13 @@
 import type { Context } from '@cyanheads/mcp-ts-core';
 import { notFound, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import { fetchWithTimeout, type RequestContext, withRetry } from '@cyanheads/mcp-ts-core/utils';
-import type { NdbcObservation, NdbcStation } from './types.js';
+import type { NdbcCurrentBin, NdbcCurrentProfile, NdbcObservation, NdbcStation } from './types.js';
 
 const ACTIVE_STATIONS_URL = 'https://www.ndbc.noaa.gov/activestations.xml';
 const REALTIME_URL = (id: string) =>
   `https://www.ndbc.noaa.gov/data/realtime2/${id.toUpperCase()}.txt`;
+const ADCP_URL = (id: string) =>
+  `https://www.ndbc.noaa.gov/data/realtime2/${id.toUpperCase()}.adcp`;
 const CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
 
 interface StationCache {
@@ -84,6 +86,107 @@ export class NdbcService {
         signal: ctx.signal,
       },
     );
+  }
+
+  /** Fetch and parse the latest ADCP current profile for a station from the realtime2 `.adcp` feed. */
+  async fetchCurrentProfile(stationId: string, ctx: Context): Promise<NdbcCurrentProfile> {
+    return await withRetry(
+      async () => {
+        const url = ADCP_URL(stationId);
+        const response = await fetchWithTimeout(url, 10_000, ctx as unknown as RequestContext, {
+          signal: ctx.signal,
+        });
+
+        const text = await response.text();
+        if (/^\s*<(!DOCTYPE\s+html|html[\s>])/i.test(text)) {
+          throw serviceUnavailable('NDBC ADCP endpoint returned HTML — likely rate-limited.');
+        }
+
+        return this.parseAdcpText(text, stationId);
+      },
+      {
+        operation: `NdbcService.fetchCurrentProfile(${stationId})`,
+        context: ctx as unknown as RequestContext,
+        baseDelayMs: 1000,
+        maxRetries: 2,
+        signal: ctx.signal,
+      },
+    );
+  }
+
+  /**
+   * Parse an NDBC ADCP (`.adcp`) realtime file into the most recent current profile.
+   * Layout: two `#`-prefixed header lines (`#YY MM DD hh mm DEP01 DIR01 SPD01 …`,
+   * then a units line), followed by data rows most-recent-first. Each data row is
+   * `YY MM DD hh mm` then up to 20 depth-bin triples (depth m, direction degT, speed cm/s).
+   * Rows are variable-width — trailing bins are omitted rather than padded — and any
+   * component may be the literal `MM` (missing). A bin is emitted only when its depth
+   * is present; direction and speed become null when their token is `MM`.
+   */
+  parseAdcpText(text: string, stationId: string): NdbcCurrentProfile {
+    const lines = text
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean);
+
+    if (!lines.some((l) => l.startsWith('#'))) {
+      throw serviceUnavailable(`NDBC ADCP file for ${stationId} has no header row.`);
+    }
+
+    // Rows are reverse-chronological, so the first non-header line is the latest observation.
+    const dataLine = lines.find((l) => !l.startsWith('#'));
+    if (!dataLine) {
+      throw notFound(
+        `NDBC station ${stationId} has no current-profile data rows — station may be offline.`,
+        {
+          stationId,
+          reason: 'no_current_data',
+        },
+      );
+    }
+
+    const tokens = dataLine.split(/\s+/);
+    const bins: NdbcCurrentBin[] = [];
+    // Direction/speed are null when NDBC wrote the literal `MM` for that component.
+    const parseComponent = (tok: string | undefined): number | null => {
+      if (tok === undefined || tok === 'MM') return null;
+      const n = Number.parseFloat(tok);
+      return Number.isNaN(n) ? null : n;
+    };
+    // Skip the 5 leading time columns (YY MM DD hh mm); the rest are depth/dir/speed triples.
+    for (let i = 5; i + 3 <= tokens.length; i += 3) {
+      const depthTok = tokens[i];
+      if (depthTok === undefined || depthTok === 'MM') continue;
+      const depthM = Number.parseFloat(depthTok);
+      if (Number.isNaN(depthM)) continue;
+
+      bins.push({
+        depthM,
+        directionDeg: parseComponent(tokens[i + 1]),
+        speedCmS: parseComponent(tokens[i + 2]),
+      });
+    }
+
+    if (bins.length === 0) {
+      throw notFound(
+        `NDBC station ${stationId} reported no usable current bins — profiler offline or all bins missing.`,
+        { stationId, reason: 'no_current_data' },
+      );
+    }
+
+    // Build the ISO timestamp from the YY MM DD hh mm columns. NDBC emits 4-digit years in
+    // the YY column, so treat values ≥ 1000 as already-full years (mirrors parseRealtimeText).
+    const [yy, mo, dd, hh, mn] = tokens;
+    const observedAt =
+      yy && mo && dd && hh && mn
+        ? (() => {
+            const n = Number.parseInt(yy, 10);
+            const year = n >= 1000 ? n : n < 50 ? 2000 + n : 1900 + n;
+            return `${year}-${mo.padStart(2, '0')}-${dd.padStart(2, '0')}T${hh.padStart(2, '0')}:${mn.padStart(2, '0')}:00Z`;
+          })()
+        : new Date().toISOString();
+
+    return { observedAt, bins };
   }
 
   /** Parse NDBC active stations XML into NdbcStation array. */

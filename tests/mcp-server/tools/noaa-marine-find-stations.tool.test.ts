@@ -31,8 +31,8 @@ const NDBC_BUOY = {
 };
 
 /**
- * TFBLK shape — NDBC flags it met="n", but its platform `type` string contains "buoy".
- * 126 of the 1359 currently-active NDBC stations look like this.
+ * TFBLK shape — NDBC flags both met="n" and currents="n", with platform `type` "buoy".
+ * Under the platform/capability split it has NO data capability; its identity is the platform class.
  */
 const NDBC_NON_MET_BUOY = {
   id: 'TFBLK',
@@ -44,7 +44,11 @@ const NDBC_NON_MET_BUOY = {
   hasCurrents: false,
 };
 
-/** 44033 shape — the only active NDBC station whose sole capability is currents. */
+/**
+ * 44033 shape — a currents-capable NDBC station (currents flag set, met off), platform "buoy".
+ * Exercises the current_profile capability path. (The live catalog's currents flags drift; this
+ * fixture pins the capable case.)
+ */
 const NDBC_CURRENTS_ONLY = {
   id: '44033',
   name: 'Buoy F01 - Penobscot Bay',
@@ -325,7 +329,7 @@ describe('noaaMarineFindStations', () => {
     expect(result.stations.every((s) => s.capabilities.includes('met'))).toBe(true);
   });
 
-  it('matches a met=false buoy-typed station on a types:["buoy"] filter', async () => {
+  it('matches a bare-platform buoy on a types:["buoy"] platform filter without fabricating a capability', async () => {
     const ctx = createMockContext({ errors: noaaMarineFindStations.errors });
     await mockCatalog({}, [NDBC_NON_MET_BUOY, NDBC_BUOY]);
 
@@ -336,15 +340,22 @@ describe('noaaMarineFindStations', () => {
     });
     const result = await noaaMarineFindStations.handler(input, ctx);
 
-    // Met-capable rows are no longer a catch-all match for `buoy`.
+    // buoy is a platform filter; met-capable rows (no platform) are not a match, and the matched
+    // bare platform reports an empty capability list + its platform class — never a "buoy" capability.
     expect(result.stations.map((s) => s.station_id)).toEqual(['TFBLK']);
-    expect(result.stations[0]!.capabilities).toEqual(['buoy']);
+    expect(result.stations[0]!.capabilities).toEqual([]);
+    expect(result.stations[0]!.platform).toBe('buoy');
+    expect(result.stations[0]!.type).toBeUndefined();
   });
 
-  it('leaves a currents-only NDBC station out of every types filter but reachable unfiltered', async () => {
+  // --- #15: NDBC currents are reachable via a dedicated current_profile filter ---
+
+  it('reaches an NDBC currents station via types:["current_profile"], not the CO-OPS current filter', async () => {
     const ctx = createMockContext({ errors: noaaMarineFindStations.errors });
 
-    for (const t of ['tide', 'current', 'water_level', 'buoy', 'met'] as const) {
+    // The CO-OPS `current` filter and the other capability filters must NOT match an NDBC
+    // currents station — only `current_profile` (and its `buoy` platform) reach it.
+    for (const t of ['tide', 'current', 'water_level', 'met'] as const) {
       await mockCatalog({}, [NDBC_CURRENTS_ONLY]);
       const filtered = noaaMarineFindStations.input.parse({
         source: 'ndbc',
@@ -356,12 +367,17 @@ describe('noaaMarineFindStations', () => {
       });
     }
 
-    // The documented escape hatch: no types filter.
     await mockCatalog({}, [NDBC_CURRENTS_ONLY]);
-    const unfiltered = noaaMarineFindStations.input.parse({ source: 'ndbc', limit: 5 });
-    const result = await noaaMarineFindStations.handler(unfiltered, ctx);
+    const input = noaaMarineFindStations.input.parse({
+      source: 'ndbc',
+      types: ['current_profile'],
+      limit: 5,
+    });
+    const result = await noaaMarineFindStations.handler(input, ctx);
     expect(result.stations[0]!.station_id).toBe('44033');
-    expect(result.stations[0]!.capabilities).toEqual(['currents']);
+    expect(result.stations[0]!.capabilities).toEqual(['current_profile']);
+    expect(result.stations[0]!.type).toBe('current_profile');
+    expect(result.stations[0]!.platform).toBe('buoy');
   });
 
   // --- #12: `type` must not contradict the requested capability ---
@@ -424,8 +440,16 @@ describe('noaaMarineFindStations', () => {
 
     expect(result.stations).toHaveLength(4);
     for (const s of result.stations) {
-      expect(s.capabilities).toContain(s.type);
+      // type, when present, is always a real data capability — never a platform class, never fabricated.
+      if (s.type !== undefined) expect(s.capabilities).toContain(s.type);
+      // #13: "buoy" is never a capability — a bare platform reports an empty capability list.
+      expect(s.capabilities).not.toContain('buoy');
     }
+    // The bare-platform buoy (TFBLK) carries no capability and no type, only its platform class.
+    const bare = result.stations.find((s) => s.station_id === 'TFBLK')!;
+    expect(bare.capabilities).toEqual([]);
+    expect(bare.type).toBeUndefined();
+    expect(bare.platform).toBe('buoy');
   });
 
   it('format renders station_id, name, source, and capabilities', () => {
@@ -449,5 +473,28 @@ describe('noaaMarineFindStations', () => {
     expect(text).toContain('Seattle');
     expect(text).toContain('tide');
     expect(text).toContain('water_level');
+  });
+
+  it('format renders the NDBC platform class and omits type for a bare platform', () => {
+    const output = {
+      total_found: 1,
+      stations: [
+        {
+          station_id: 'TFBLK',
+          name: '10.0 nm WNW on Blakknes, Iceland',
+          source: 'ndbc' as const,
+          platform: 'buoy',
+          latitude: 65.6,
+          longitude: -24.3,
+          capabilities: [] as string[],
+        },
+      ],
+    };
+    const blocks = noaaMarineFindStations.format!(output);
+    const text = (blocks[0] as { text: string }).text;
+    expect(text).toContain('Platform:** buoy');
+    // No data capability → no "Type:" segment and a "none reported" capability line.
+    expect(text).not.toContain('Type:');
+    expect(text).toContain('none reported');
   });
 });

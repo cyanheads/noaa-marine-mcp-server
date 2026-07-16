@@ -11,7 +11,10 @@ import { getNdbcService } from '@/services/ndbc/ndbc-service.js';
 export const noaaMarineStationResource = resource('noaa-marine://station/{station_id}', {
   name: 'noaa_marine_station',
   description:
-    'Metadata for a CO-OPS or NDBC station by ID: name, coordinates, source, capabilities, and state. ' +
+    'Metadata for a CO-OPS or NDBC station by ID: name, coordinates, source, data capabilities, and — for NDBC — ' +
+    'the physical platform class. `type` is the primary data capability (same meaning as in noaa_marine_find_stations), ' +
+    'omitted when the station reports no data capability; `platform` is the NDBC platform class ' +
+    '(buoy, fixed, oilrig, dart, tao, usv, other) and is a separate axis, absent for CO-OPS. ' +
     'CO-OPS station IDs are numeric (tide/water-level) or alphanumeric (current stations). ' +
     'NDBC station IDs are 5-character alphanumeric codes. ' +
     'Use noaa_marine_find_stations to discover station IDs.',
@@ -49,11 +52,11 @@ export const noaaMarineStationResource = resource('noaa-marine://station/{statio
         waterLevel.find((s) => s.id.toUpperCase() === id);
 
       if (match) {
+        // A CO-OPS match came from one of the three lists, so at least one capability is present.
         const caps: string[] = [];
         if (tide.some((s) => s.id.toUpperCase() === id)) caps.push('tide');
         if (current.some((s) => s.id.toUpperCase() === id)) caps.push('current');
         if (waterLevel.some((s) => s.id.toUpperCase() === id)) caps.push('water_level');
-        if (caps.length === 0) caps.push('tide');
 
         const result: Record<string, unknown> = {
           station_id: match.id,
@@ -63,8 +66,11 @@ export const noaaMarineStationResource = resource('noaa-marine://station/{statio
           longitude: match.lng,
           capabilities: caps,
         };
+        // `type` is the primary data capability — the same axis find_stations reports. The CO-OPS
+        // catalog `type` code (R/T/S reference classes) is a different, undocumented axis and is not
+        // surfaced here; CO-OPS has no platform class.
+        if (caps[0]) result.type = caps[0];
         if (match.state) result.state = match.state;
-        if (match.type) result.type = match.type;
         return result;
       }
     }
@@ -73,19 +79,23 @@ export const noaaMarineStationResource = resource('noaa-marine://station/{statio
     if (ndbcResult.status === 'fulfilled') {
       const match = ndbcResult.value.find((s) => s.id.toUpperCase() === id);
       if (match) {
+        // Data capabilities from the catalog flags only — no fabricated "buoy" when both are off (#13).
+        // `current_profile` (NDBC observed ocean currents) is named apart from CO-OPS `current`.
         const caps: string[] = [];
         if (match.hasMet) caps.push('met');
-        if (match.hasCurrents) caps.push('currents');
-        if (caps.length === 0) caps.push('buoy');
+        if (match.hasCurrents) caps.push('current_profile');
         const result: Record<string, unknown> = {
           station_id: match.id,
           name: match.name,
           source: 'ndbc',
           latitude: match.lat,
           longitude: match.lon,
-          type: match.type ?? 'buoy',
           capabilities: caps,
         };
+        // `type` is the primary data capability (same axis as find_stations), omitted when the
+        // station serves no data. `platform` is the NDBC physical class — a separate axis (#14).
+        if (caps[0]) result.type = caps[0];
+        if (match.type) result.platform = match.type;
         if (match.owner) result.owner = match.owner;
         return result;
       }

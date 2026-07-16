@@ -220,3 +220,70 @@ describe('NdbcService.parseActiveStationsXml', () => {
     expect(stations[0]!.name).toBe('Cape Elizabeth');
   });
 });
+
+describe('NdbcService.parseAdcpText', () => {
+  let svc: NdbcService;
+
+  beforeEach(() => {
+    svc = makeService();
+  });
+
+  // Two-line ADCP header (column names + units). The parser keys off the leading `#`, then
+  // reads data rows positionally, so a 3-bin header is enough to exercise real rows.
+  const ADCP_HEADER =
+    '#YY  MM DD hh mm DEP01 DIR01 SPD01 DEP02 DIR02 SPD02 DEP03 DIR03 SPD03\n' +
+    '#yr  mo dy hr mn     m  degT  cm/s     m  degT  cm/s     m  degT  cm/s\n';
+
+  it('parses the latest row into depth bins, nulling MM components but keeping the depth', () => {
+    const text =
+      ADCP_HEADER +
+      '2026 07 16 00 00     2   210    19     4   300     8     6    MM    MM\n' +
+      '2026 07 15 23 00     2   200    22     4   310    10     6   330    12\n';
+    const profile = svc.parseAdcpText(text, '44033');
+
+    // Reverse-chronological: the first data row is the most recent observation.
+    expect(profile.observedAt).toBe('2026-07-16T00:00:00Z');
+    expect(profile.bins).toHaveLength(3);
+    expect(profile.bins[0]).toEqual({ depthM: 2, directionDeg: 210, speedCmS: 19 });
+    expect(profile.bins[1]).toEqual({ depthM: 4, directionDeg: 300, speedCmS: 8 });
+    // Depth present, direction+speed MM → the bin is kept with null components.
+    expect(profile.bins[2]).toEqual({ depthM: 6, directionDeg: null, speedCmS: null });
+  });
+
+  it('handles a variable-width row where trailing bins are omitted (not MM-padded)', () => {
+    const text = `${ADCP_HEADER}2026 07 15 14 00     2   340    27\n`;
+    const profile = svc.parseAdcpText(text, '44033');
+
+    expect(profile.bins).toHaveLength(1);
+    expect(profile.bins[0]).toEqual({ depthM: 2, directionDeg: 340, speedCmS: 27 });
+  });
+
+  it('throws no_current_data when the ADCP file has a header but no data rows', () => {
+    let caught: unknown;
+    try {
+      svc.parseAdcpText(ADCP_HEADER, 'EMPTY');
+    } catch (err) {
+      caught = err;
+    }
+    expect((caught as Error).message).toMatch(/no current-profile data rows/i);
+    expect((caught as { data?: { reason?: string } }).data?.reason).toBe('no_current_data');
+  });
+
+  it('throws no_current_data when every bin in the latest row is MM (no anchoring depth)', () => {
+    const text = `${ADCP_HEADER}2026 07 16 00 00    MM    MM    MM\n`;
+    let caught: unknown;
+    try {
+      svc.parseAdcpText(text, 'ALLMM');
+    } catch (err) {
+      caught = err;
+    }
+    expect((caught as Error).message).toMatch(/no usable current bins/i);
+    expect((caught as { data?: { reason?: string } }).data?.reason).toBe('no_current_data');
+  });
+
+  it('throws ServiceUnavailable when there is no header row', () => {
+    expect(() => svc.parseAdcpText('2026 07 16 00 00 2 210 19\n', 'NOHDR')).toThrow(
+      /no header row/i,
+    );
+  });
+});

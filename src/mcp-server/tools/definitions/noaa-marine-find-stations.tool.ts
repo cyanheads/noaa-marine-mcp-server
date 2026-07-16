@@ -82,10 +82,13 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
   title: 'Find Marine Stations',
   description:
     'Find CO-OPS tide/water-level/current stations and NDBC buoys near a location or by name/state. ' +
-    'Returns a unified station list with source, type, capabilities, and coordinates. ' +
+    'Returns a unified station list with source, data capabilities, coordinates, and — for NDBC — the physical platform class. ' +
     'This is the required first step to resolve place names or coordinates to station IDs before calling data tools. ' +
     'CO-OPS station IDs are numeric (e.g. 9447130 for Seattle); current station IDs are alphanumeric (e.g. ACT4176). ' +
     'NDBC buoy IDs are 5-character alphanumeric codes (e.g. 46041). ' +
+    'Two axes are reported separately: `capabilities`/`type` describe the data products a station serves ' +
+    '(tide, current, water_level, met, current_profile), while `platform` is the NDBC physical classification ' +
+    '(buoy, fixed, oilrig, dart, tao, usv, other). CO-OPS stations carry no platform class. ' +
     'Provide latitude and longitude together for proximity search, or query/state for name-based search — both may be combined. ' +
     'Note: CO-OPS current stations are cataloged by monitoring capability, not prediction availability. ' +
     'If noaa_marine_get_currents returns no_predictions for a station, try the next nearest current station.',
@@ -142,19 +145,24 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
     types: z
       .array(
         z
-          .enum(['tide', 'current', 'water_level', 'buoy', 'met'])
+          .enum(['tide', 'current', 'water_level', 'met', 'current_profile', 'buoy'])
           .describe(
-            'Station capability, matched against the capabilities list of each station: tide (CO-OPS tide predictions), ' +
-              'current (CO-OPS current predictions), water_level (CO-OPS observed water levels), ' +
-              'met (NDBC meteorological — the stations noaa_marine_get_conditions reads), ' +
-              'buoy (NDBC station reporting neither met nor currents).',
+            "Filter value. Five are data capabilities, matched against a station's capabilities list: " +
+              'tide (CO-OPS tide predictions → noaa_marine_get_tide_predictions), ' +
+              'current (CO-OPS tidal-current predictions → noaa_marine_get_currents), ' +
+              'water_level (CO-OPS observed water levels → noaa_marine_get_water_level), ' +
+              'met (NDBC meteorological → noaa_marine_get_conditions), ' +
+              'current_profile (NDBC observed ocean-current depth profile → noaa_marine_get_current_profile; ' +
+              'note this is a different data product and source than CO-OPS `current`). ' +
+              'The sixth, buoy, is a physical-platform filter (NDBC platform class equals buoy), not a data ' +
+              'capability — use it to select buoy-class platforms regardless of what data they serve.',
           ),
       )
       .optional()
       .describe(
-        'Filter by station capability. Every returned station carries at least one of the requested values in its ' +
-          'capabilities list. Omit to return all types. NDBC stations whose only capability is currents match none ' +
-          'of these values — reach them with source="ndbc" and no types filter, or by name/ID via query.',
+        'Filter by data capability or NDBC platform class. Every returned station matches at least one requested ' +
+          'value — a capability value against its capabilities list, or buoy against its platform class. ' +
+          'Omit to return all stations.',
       ),
     limit: z
       .number()
@@ -177,11 +185,21 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
               .describe('Data source: coops (CO-OPS) or ndbc (NDBC buoy).'),
             type: z
               .string()
+              .optional()
               .describe(
-                'The capability this row leads with — always one of the values in capabilities. When a types filter ' +
-                  'is set this is the first requested capability the station has, so it never contradicts the filter; ' +
-                  'otherwise it is the first capability. This is a data-product capability, not the physical platform ' +
-                  'classification — for that, read the noaa-marine://station/{station_id} resource.',
+                'The data capability this row leads with — always one of the values in capabilities. When a types ' +
+                  'filter of capability values is set this is the first requested capability the station has, so it ' +
+                  'never contradicts the filter; otherwise it is the first capability. Omitted when the station has ' +
+                  'no data capability (e.g. a bare buoy/fixed platform matched only by a platform filter) — read ' +
+                  'platform for its identity. This is a data-product axis, never the physical platform class.',
+              ),
+            platform: z
+              .string()
+              .optional()
+              .describe(
+                'NDBC physical platform class: buoy, fixed, oilrig, dart, tao, usv, or other. A different axis than ' +
+                  'type/capabilities (which describe data products). Omitted for CO-OPS stations — CO-OPS publishes ' +
+                  'no platform taxonomy.',
               ),
             latitude: z.number().describe('Station latitude in decimal degrees.'),
             longitude: z.number().describe('Station longitude in decimal degrees.'),
@@ -197,7 +215,10 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
               .describe('US state or territory code (CO-OPS stations only).'),
             capabilities: z
               .array(z.string().describe('Capability identifier, e.g. "tide", "water_level".'))
-              .describe('List of data products available at this station.'),
+              .describe(
+                'Data products available at this station: any of tide, current, water_level (CO-OPS) or met, ' +
+                  'current_profile (NDBC). Empty when the station reports no data capability — platform still identifies it.',
+              ),
           })
           .describe('A single station matching the search criteria.'),
       )
@@ -242,10 +263,11 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
       latitude: number;
       longitude: number;
       name: string;
+      platform?: string;
       source: 'coops' | 'ndbc';
       state?: string;
       station_id: string;
-      type: string;
+      type?: string;
     }
 
     // A lone latitude or longitude cannot anchor a proximity search. Reject the pair
@@ -269,18 +291,24 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
     // An empty types array means the same thing as no types array.
     const typeFilter = input.types?.length ? input.types : undefined;
 
-    /** True when the station carries at least one of the requested capabilities. */
-    const matchesTypeFilter = (capabilities: string[]): boolean =>
-      !typeFilter || typeFilter.some((t) => capabilities.includes(t));
+    /**
+     * True when the station carries at least one of the requested filter values among its
+     * match tokens. Callers pass a station's data capabilities plus (for NDBC) its platform
+     * class, so a `buoy` platform filter matches a bare platform and a `met` filter matches a
+     * capability — both flow through one predicate.
+     */
+    const matchesTypeFilter = (tokens: string[]): boolean =>
+      !typeFilter || typeFilter.some((t) => tokens.includes(t));
 
     /**
-     * The capability a row leads with. Under a types filter this is the first requested
-     * capability the station actually has, so `type` can never contradict the filter that
-     * selected the row; unfiltered, it is the station's first capability. Both this and
-     * matchesTypeFilter read the same capabilities array, so the two agree by construction.
+     * The data capability a row leads with — always drawn from `capabilities`, never the
+     * platform class. Under a capability filter this is the first requested capability the
+     * station has, so `type` never contradicts it; a platform-only filter (`buoy`) matches
+     * nothing in capabilities, so `type` falls to the first capability, or undefined when the
+     * station has none (its platform then carries its identity).
      */
-    const primaryTypeFor = (capabilities: string[]): string =>
-      typeFilter?.find((t) => capabilities.includes(t)) ?? capabilities[0] ?? 'unknown';
+    const primaryTypeFor = (capabilities: string[]): string | undefined =>
+      typeFilter?.find((t) => capabilities.includes(t)) ?? capabilities[0];
 
     const results: StationResult[] = [];
 
@@ -328,11 +356,12 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
           station_id: s.id,
           name: s.name,
           source: 'coops',
-          type: primaryTypeFor(s.capabilities),
           latitude: s.lat,
           longitude: s.lng,
           capabilities: s.capabilities,
         };
+        const coopsType = primaryTypeFor(s.capabilities);
+        if (coopsType) entry.type = coopsType;
         if (s.state) entry.state = s.state;
 
         if (center) {
@@ -348,16 +377,22 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
     // Process NDBC stations
     if (ndbcResult.status === 'fulfilled' && ndbcResult.value) {
       for (const s of ndbcResult.value) {
-        // Derive capabilities from the NDBC flags BEFORE filtering, so the filter and the
-        // reported capabilities read the same array. The station's `type` attribute is a
-        // platform classification (buoy/fixed/oilrig/dart/…), not a capability — matching
-        // it against a `met` filter admits buoys NDBC flags as met="n".
+        // Data capabilities come only from the NDBC catalog flags — never the platform class.
+        // `current_profile` is NDBC observed ocean currents (the .adcp profile
+        // noaa_marine_get_current_profile reads), named apart from CO-OPS `current` (tidal-current
+        // predictions) so both stay filterable without a one-letter collision. When both flags are
+        // off the list stays empty — a bare platform is not a fabricated "buoy" capability (#13).
         const capabilities: string[] = [];
         if (s.hasMet) capabilities.push('met');
-        if (s.hasCurrents) capabilities.push('currents');
-        if (capabilities.length === 0) capabilities.push('buoy');
+        if (s.hasCurrents) capabilities.push('current_profile');
 
-        if (!matchesTypeFilter(capabilities)) continue;
+        // Platform class (buoy/fixed/oilrig/dart/tao/usv/other) is a separate axis. Fold it into
+        // the tokens the filter matches so a `buoy` platform filter reaches bare platforms; only
+        // platform values present in the `types` enum (currently just `buoy`) are ever requestable.
+        const platform = s.type;
+        const matchTokens = platform ? [...capabilities, platform] : capabilities;
+
+        if (!matchesTypeFilter(matchTokens)) continue;
         if (query && !s.name.toLowerCase().includes(query) && !s.id.toLowerCase().includes(query))
           continue;
 
@@ -365,11 +400,13 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
           station_id: s.id,
           name: s.name,
           source: 'ndbc',
-          type: primaryTypeFor(capabilities),
           latitude: s.lat,
           longitude: s.lon,
           capabilities,
         };
+        const ndbcType = primaryTypeFor(capabilities);
+        if (ndbcType) entry.type = ndbcType;
+        if (platform) entry.platform = platform;
 
         if (center) {
           const dist = haversineKm(center.lat, center.lon, s.lat, s.lon);
@@ -423,11 +460,13 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
     for (const s of result.stations) {
       const dist = s.distance_km !== undefined ? ` · ${s.distance_km} km` : '';
       const state = s.state ? ` · ${s.state}` : '';
+      const typeStr = s.type ? ` · **Type:** ${s.type}` : '';
+      const platformStr = s.platform ? ` · **Platform:** ${s.platform}` : '';
       lines.push(
         `### ${s.name} (${s.station_id})`,
-        `**Source:** ${s.source.toUpperCase()} · **Type:** ${s.type}${dist}${state}`,
+        `**Source:** ${s.source.toUpperCase()}${typeStr}${platformStr}${dist}${state}`,
         `**Coordinates:** ${s.latitude}, ${s.longitude}`,
-        `**Capabilities:** ${s.capabilities.join(', ')}`,
+        `**Capabilities:** ${s.capabilities.length > 0 ? s.capabilities.join(', ') : 'none reported'}`,
         '',
       );
     }
