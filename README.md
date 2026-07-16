@@ -1,13 +1,13 @@
 <div align="center">
   <h1>@cyanheads/noaa-marine-mcp-server</h1>
   <p><b>Find NOAA tide stations and NDBC buoys, fetch tide predictions, water levels, tidal currents, and live buoy conditions via MCP. STDIO or Streamable HTTP.</b>
-  <div>6 Tools • 1 Resource</div>
+  <div>7 Tools • 1 Resource</div>
   </p>
 </div>
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.2.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/noaa-marine-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/noaa-marine-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/noaa-marine-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.14-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.3.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/noaa-marine-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/noaa-marine-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/noaa-marine-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.14-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -29,7 +29,7 @@
 
 ## Tools
 
-Six tools covering the full US marine operational workflow — station discovery, tide predictions, observed water levels, tidal current predictions and profiles, and live offshore buoy conditions:
+Seven tools covering the full US marine operational workflow — station discovery, tide predictions, observed water levels, tidal current predictions and profiles, and live offshore buoy conditions:
 
 | Tool | Description |
 |:-----|:------------|
@@ -39,6 +39,7 @@ Six tools covering the full US marine operational workflow — station discovery
 | `noaa_marine_get_currents` | Tidal current predictions for a CO-OPS current station: max flood/ebb speeds, slack times, and directions. Defaults to MAX_SLACK (practical passage-planning view). |
 | `noaa_marine_get_conditions` | Live marine conditions from an NDBC buoy: wave height/period/direction, wind, sea-surface temp, air temp, and barometric pressure. |
 | `noaa_marine_get_current_profile` | Observed ocean-current depth profile from an NDBC ADCP buoy: speed and direction at each depth bin. Distinct from `noaa_marine_get_currents`, which is a CO-OPS tidal-current forecast. |
+| `noaa_marine_get_ocean_observations` | Sub-surface water-column observations from an NDBC station: water temperature, salinity, dissolved oxygen, chlorophyll, turbidity, and pH at each reported depth. The water-column counterpart to `noaa_marine_get_conditions` (surface weather and sea state). |
 
 ### `noaa_marine_find_stations`
 
@@ -105,6 +106,15 @@ Observed ocean-current depth profile from an NDBC ADCP buoy — the most recent 
 - Distinct from `noaa_marine_get_currents`: this is an NDBC *observed* acoustic-Doppler measurement, not a CO-OPS tidal-current *prediction*
 - Most NDBC stations serve no ADCP profile — use `find_stations` with `source="ndbc"` and `types: ["current_profile"]` to discover the ones that do
 - Direction or speed is `null` for a bin when NDBC did not report that component
+
+### `noaa_marine_get_ocean_observations`
+
+Sub-surface water-column observations from an NDBC station — the most recent reading at each reported depth.
+
+- Water temperature (°C), conductivity (mS/cm), salinity (psu), dissolved oxygen (% saturation and ppm), chlorophyll (µg/l), turbidity (FTU), pH, and redox potential (mV) per depth
+- The water-column counterpart to `noaa_marine_get_conditions`: this reports what the water is doing below the surface, that one reports surface weather and sea state
+- Sensor coverage is sparse — most stations report only temperature and salinity; any value the station did not report comes back `null`, never a fabricated zero
+- Sub-surface sensors are on only a subset of NDBC stations and carry no station-catalog flag, so there is no capability filter — call it on candidate `source="ndbc"` station IDs and expect the `observations_not_found` error on the many stations that serve no ocean file
 
 ## Resources and prompts
 

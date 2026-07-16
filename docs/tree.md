@@ -1,6 +1,6 @@
 # noaa-marine-mcp-server - Directory Structure
 
-Generated on: 2026-07-16 10:03:28
+Generated on: 2026-07-16 18:55:52
 
 ```text
 noaa-marine-mcp-server/
@@ -143,6 +143,7 @@ noaa-marine-mcp-server/
 │   │           ├── noaa-marine-get-conditions.tool.ts
 │   │           ├── noaa-marine-get-current-profile.tool.ts
 │   │           ├── noaa-marine-get-currents.tool.ts
+│   │           ├── noaa-marine-get-ocean-observations.tool.ts
 │   │           ├── noaa-marine-get-tide-predictions.tool.ts
 │   │           └── noaa-marine-get-water-level.tool.ts
 │   ├── services/
@@ -163,6 +164,7 @@ noaa-marine-mcp-server/
 │   │       ├── noaa-marine-get-conditions.tool.test.ts
 │   │       ├── noaa-marine-get-current-profile.tool.test.ts
 │   │       ├── noaa-marine-get-currents.tool.test.ts
+│   │       ├── noaa-marine-get-ocean-observations.tool.test.ts
 │   │       ├── noaa-marine-get-tide-predictions.tool.test.ts
 │   │       └── noaa-marine-get-water-level.tool.test.ts
 │   ├── prompts/

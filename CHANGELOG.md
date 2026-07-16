@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.0](changelog/0.3.x/0.3.0.md) — 2026-07-16
+
+Adds noaa_marine_get_ocean_observations — NDBC .ocean sub-surface water-column data (temperature, salinity, dissolved oxygen, chlorophyll, turbidity, pH at depth)
+
 ## [0.2.0](changelog/0.2.x/0.2.0.md) — 2026-07-16 · ⚠️ Breaking
 
 Adds noaa_marine_get_current_profile (NDBC observed currents) and a current_profile filter; type is now purely the data-capability axis with platform as a separate field, and the fabricated buoy capability is removed — breaking output changes
