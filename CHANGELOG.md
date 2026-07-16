@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.0](changelog/0.2.x/0.2.0.md) — 2026-07-16 · ⚠️ Breaking
+
+Adds noaa_marine_get_current_profile (NDBC observed currents) and a current_profile filter; type is now purely the data-capability axis with platform as a separate field, and the fabricated buoy capability is removed — breaking output changes
+
 ## [0.1.7](changelog/0.1.x/0.1.7.md) — 2026-07-15 · 🛡️ Security
 
 Four bug fixes: noaa_marine_find_stations rejects incomplete lat/lon pairs, fixes its NDBC met filter and type field; noaa_marine_get_conditions guidance now points at conditions-capable stations; mcp-ts-core ^0.10.14, supply-chain hardening
