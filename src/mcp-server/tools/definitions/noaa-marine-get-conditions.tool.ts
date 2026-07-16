@@ -16,7 +16,10 @@ export const noaaMarineGetConditions = tool('noaa_marine_get_conditions', {
     'Exceptions: TIDE is in feet and VIS is in nautical miles (rarely populated at offshore buoys). ' +
     'Numeric fields are null when the buoy sensor did not report a value — this is normal for offshore buoys. ' +
     'Observations are updated approximately every 10 minutes; data may be 10–20 minutes old. ' +
-    'Use noaa_marine_find_stations with source="ndbc" to find buoy station IDs near a location.',
+    'Use noaa_marine_find_stations with source="ndbc" and types=["met"] to find station IDs near a location — ' +
+    'met-flagged stations are the ones most likely to serve live conditions. Roughly a third of active NDBC ' +
+    'stations report neither meteorological nor current data, and most of those have no observation file, so ' +
+    'omitting the types filter will surface station IDs this tool cannot read.',
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   input: z.object({
@@ -25,7 +28,7 @@ export const noaaMarineGetConditions = tool('noaa_marine_get_conditions', {
       .regex(/^[A-Za-z0-9_-]{1,20}$/)
       .describe(
         'NDBC buoy station ID (5-character alphanumeric, e.g. "46041" for Cape Elizabeth). ' +
-          'Obtain from noaa_marine_find_stations with source="ndbc".',
+          'Obtain from noaa_marine_find_stations with source="ndbc" and types=["met"].',
       ),
   }),
 
@@ -91,14 +94,14 @@ export const noaaMarineGetConditions = tool('noaa_marine_get_conditions', {
       code: JsonRpcErrorCode.NotFound,
       when: 'NDBC returned 404 for the station ID.',
       recovery:
-        'Verify the station ID using noaa_marine_find_stations with source="ndbc" and try again.',
+        'Find a conditions-capable station with noaa_marine_find_stations using source="ndbc" and types=["met"] — an unfiltered NDBC search returns stations that have no observation file.',
     },
     {
       reason: 'no_sensor_data',
       code: JsonRpcErrorCode.NotFound,
       when: 'Buoy file exists but all sensor fields are MM (missing) — buoy offline or sensor failure.',
       recovery:
-        'The buoy may be temporarily offline. Try a nearby buoy via noaa_marine_find_stations.',
+        'This station may be temporarily offline — try a nearby one from noaa_marine_find_stations with source="ndbc" and types=["met"].',
     },
   ],
 
@@ -129,7 +132,7 @@ export const noaaMarineGetConditions = tool('noaa_marine_get_conditions', {
         }
         throw ctx.fail(
           'buoy_not_found',
-          `NDBC buoy ${input.station_id} not found — verify the ID with noaa_marine_find_stations.`,
+          `NDBC has no observation file for station ${input.station_id} — use noaa_marine_find_stations with source="ndbc" and types=["met"] to find a conditions-capable station.`,
           { ...ctx.recoveryFor('buoy_not_found') },
         );
       }

@@ -56,6 +56,7 @@ Typed domain failures the implementer must enumerate in each tool's `errors: [..
 | Tool | reason | code | when |
 |:-----|:-------|:-----|:-----|
 | `noaa_marine_find_stations` | `no_results` | `NotFound` | No stations match the query/location/filters — agent should widen the search or try a different state/type |
+| `noaa_marine_find_stations` | `incomplete_coordinates` | `InvalidParams` | Only one of latitude/longitude was supplied — proximity search needs the pair |
 | `noaa_marine_get_tide_predictions` | `station_not_found` | `InvalidParams` | CO-OPS returned an error for the station ID (likely wrong type — use a `find_stations` result) |
 | `noaa_marine_get_tide_predictions` | `date_range_exceeded` | `InvalidParams` | Requested range exceeds 1-year CO-OPS limit — split into multiple calls |
 | `noaa_marine_get_tide_predictions` | `no_predictions` | `NotFound` | Station exists but CO-OPS returned no prediction data for the date range (station inactive or type mismatch) |
@@ -65,7 +66,7 @@ Typed domain failures the implementer must enumerate in each tool's `errors: [..
 | `noaa_marine_get_currents` | `station_not_found` | `InvalidParams` | CO-OPS returned an error for the station ID (current stations require alphanumeric IDs like `ACT4176`) |
 | `noaa_marine_get_currents` | `date_range_exceeded` | `InvalidParams` | Requested range exceeds 1-year CO-OPS limit — split into multiple calls |
 | `noaa_marine_get_currents` | `no_predictions` | `NotFound` | Station exists but CO-OPS returned no current-prediction data for the date range |
-| `noaa_marine_get_conditions` | `buoy_not_found` | `NotFound` | NDBC returned 404 for the station ID — verify ID with `find_stations` |
+| `noaa_marine_get_conditions` | `buoy_not_found` | `NotFound` | NDBC returned 404 for the station ID — find a conditions-capable station with `find_stations` using `types: ["met"]` |
 | `noaa_marine_get_conditions` | `no_sensor_data` | `NotFound` | Buoy file exists but all fields are MM (buoy offline or sensor failure) |
 
 ### Prompts

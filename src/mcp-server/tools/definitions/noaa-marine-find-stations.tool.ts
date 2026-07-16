@@ -86,7 +86,7 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
     'This is the required first step to resolve place names or coordinates to station IDs before calling data tools. ' +
     'CO-OPS station IDs are numeric (e.g. 9447130 for Seattle); current station IDs are alphanumeric (e.g. ACT4176). ' +
     'NDBC buoy IDs are 5-character alphanumeric codes (e.g. 46041). ' +
-    'Provide latitude/longitude for proximity search, or query/state for name-based search — both may be combined. ' +
+    'Provide latitude and longitude together for proximity search, or query/state for name-based search — both may be combined. ' +
     'Note: CO-OPS current stations are cataloged by monitoring capability, not prediction availability. ' +
     'If noaa_marine_get_currents returns no_predictions for a station, try the next nearest current station.',
   annotations: { readOnlyHint: true, openWorldHint: true },
@@ -98,7 +98,8 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
       .max(90)
       .optional()
       .describe(
-        'Center latitude in decimal degrees for proximity search. Pair with longitude and optionally radius_km.',
+        'Center latitude in decimal degrees for proximity search. Required together with longitude — ' +
+          'supplying only one is rejected rather than silently ignored. Optionally pair with radius_km.',
       ),
     longitude: z
       .number()
@@ -106,7 +107,8 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
       .max(180)
       .optional()
       .describe(
-        'Center longitude in decimal degrees for proximity search. Pair with latitude and optionally radius_km.',
+        'Center longitude in decimal degrees for proximity search. Required together with latitude — ' +
+          'supplying only one is rejected rather than silently ignored. Optionally pair with radius_km.',
       ),
     radius_km: z
       .number()
@@ -120,7 +122,8 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
       .string()
       .optional()
       .describe(
-        'Station name substring to search (case-insensitive token match). E.g. "seattle", "puget sound".',
+        'Station name substring to match, case-insensitive. E.g. "seattle", "puget sound". ' +
+          'NDBC rows also match on station ID. Blank or whitespace-only values are treated as omitted.',
       ),
     state: z
       .enum(STATE_CODES)
@@ -141,12 +144,18 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
         z
           .enum(['tide', 'current', 'water_level', 'buoy', 'met'])
           .describe(
-            'Station capability type: tide (CO-OPS tide predictions), current (CO-OPS current predictions), ' +
-              'water_level (CO-OPS observed water levels), buoy (NDBC buoy), met (NDBC meteorological).',
+            'Station capability, matched against the capabilities list of each station: tide (CO-OPS tide predictions), ' +
+              'current (CO-OPS current predictions), water_level (CO-OPS observed water levels), ' +
+              'met (NDBC meteorological — the stations noaa_marine_get_conditions reads), ' +
+              'buoy (NDBC station reporting neither met nor currents).',
           ),
       )
       .optional()
-      .describe('Filter by station type/capability. Omit to return all types.'),
+      .describe(
+        'Filter by station capability. Every returned station carries at least one of the requested values in its ' +
+          'capabilities list. Omit to return all types. NDBC stations whose only capability is currents match none ' +
+          'of these values — reach them with source="ndbc" and no types filter, or by name/ID via query.',
+      ),
     limit: z
       .number()
       .int()
@@ -169,7 +178,10 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
             type: z
               .string()
               .describe(
-                'Station type/capability string, e.g. "tide", "current", "water_level", "buoy".',
+                'The capability this row leads with — always one of the values in capabilities. When a types filter ' +
+                  'is set this is the first requested capability the station has, so it never contradicts the filter; ' +
+                  'otherwise it is the first capability. This is a data-product capability, not the physical platform ' +
+                  'classification — for that, read the noaa-marine://station/{station_id} resource.',
               ),
             latitude: z.number().describe('Station latitude in decimal degrees.'),
             longitude: z.number().describe('Station longitude in decimal degrees.'),
@@ -211,6 +223,13 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
       recovery:
         'Widen the search by increasing radius_km, removing type filters, or using a broader query.',
     },
+    {
+      reason: 'incomplete_coordinates',
+      code: JsonRpcErrorCode.InvalidParams,
+      when: 'Only one of latitude/longitude was supplied — proximity search needs the pair.',
+      recovery:
+        'Supply both latitude and longitude to search by proximity, or drop both and search by query or state instead.',
+    },
   ],
 
   async handler(input, ctx) {
@@ -229,10 +248,41 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
       type: string;
     }
 
+    // A lone latitude or longitude cannot anchor a proximity search. Reject the pair
+    // outright rather than silently dropping the distance filter and returning the
+    // global list sorted by name, which reads as a successful location search.
+    const { latitude: lat, longitude: lon } = input;
+    if ((lat === undefined) !== (lon === undefined)) {
+      const missing = lat === undefined ? 'latitude' : 'longitude';
+      throw ctx.fail(
+        'incomplete_coordinates',
+        `Proximity search needs both latitude and longitude — ${missing} is missing.`,
+        { ...ctx.recoveryFor('incomplete_coordinates') },
+      );
+    }
+    const center = lat !== undefined && lon !== undefined ? { lat, lon } : undefined;
+
+    // Blank/whitespace-only queries carry no search intent — treat them as omitted
+    // rather than substring-matching station names that contain runs of spaces.
+    const query = input.query?.trim().toLowerCase();
+
+    // An empty types array means the same thing as no types array.
+    const typeFilter = input.types?.length ? input.types : undefined;
+
+    /** True when the station carries at least one of the requested capabilities. */
+    const matchesTypeFilter = (capabilities: string[]): boolean =>
+      !typeFilter || typeFilter.some((t) => capabilities.includes(t));
+
+    /**
+     * The capability a row leads with. Under a types filter this is the first requested
+     * capability the station actually has, so `type` can never contradict the filter that
+     * selected the row; unfiltered, it is the station's first capability. Both this and
+     * matchesTypeFilter read the same capabilities array, so the two agree by construction.
+     */
+    const primaryTypeFor = (capabilities: string[]): string =>
+      typeFilter?.find((t) => capabilities.includes(t)) ?? capabilities[0] ?? 'unknown';
+
     const results: StationResult[] = [];
-    const lat = input.latitude;
-    const lon = input.longitude;
-    const hasLatLon = lat !== undefined && lat !== null && lon !== undefined && lon !== null;
 
     // Fetch CO-OPS and NDBC lists in parallel.
     // `state` is a CO-OPS-only filter — NDBC buoys carry no state, so a state-scoped
@@ -254,69 +304,39 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
     // Process CO-OPS stations
     if (coopsResults.status === 'fulfilled' && coopsResults.value) {
       const [tideStations, currentStations, waterLevelStations] = coopsResults.value;
-      const tideSet = new Set<string>();
-      const currentSet = new Set<string>();
-      const waterLevelSet = new Set<string>();
 
-      for (const s of tideStations) tideSet.add(s.id);
-      for (const s of currentStations) currentSet.add(s.id);
-      for (const s of waterLevelStations) waterLevelSet.add(s.id);
-
-      // Build unique station map — a station can appear in multiple lists
+      // Build unique station map — a station can appear in multiple lists, and each list
+      // it appears in IS one of its capabilities, so membership needs no separate index.
       const allCoops = new Map<string, (typeof tideStations)[0] & { capabilities: string[] }>();
-
-      for (const s of tideStations) {
-        if (!allCoops.has(s.id)) allCoops.set(s.id, { ...s, capabilities: [] });
-        const entry = allCoops.get(s.id);
-        if (entry && !entry.capabilities.includes('tide')) entry.capabilities.push('tide');
-      }
-      for (const s of currentStations) {
-        if (!allCoops.has(s.id)) allCoops.set(s.id, { ...s, capabilities: [] });
-        const entry = allCoops.get(s.id);
-        if (entry && !entry.capabilities.includes('current')) entry.capabilities.push('current');
-      }
-      for (const s of waterLevelStations) {
-        if (!allCoops.has(s.id)) allCoops.set(s.id, { ...s, capabilities: [] });
-        const entry = allCoops.get(s.id);
-        if (entry && !entry.capabilities.includes('water_level'))
-          entry.capabilities.push('water_level');
-      }
-
-      for (const [, s] of allCoops) {
-        // Apply type filter
-        if (input.types && input.types.length > 0) {
-          const hasMatch = input.types.some(
-            (t) =>
-              (t === 'tide' && tideSet.has(s.id)) ||
-              (t === 'current' && currentSet.has(s.id)) ||
-              (t === 'water_level' && waterLevelSet.has(s.id)),
-          );
-          if (!hasMatch) continue;
+      const addCapability = (stations: typeof tideStations, capability: string) => {
+        for (const s of stations) {
+          const entry = allCoops.get(s.id) ?? { ...s, capabilities: [] };
+          if (!entry.capabilities.includes(capability)) entry.capabilities.push(capability);
+          allCoops.set(s.id, entry);
         }
+      };
+      addCapability(tideStations, 'tide');
+      addCapability(currentStations, 'current');
+      addCapability(waterLevelStations, 'water_level');
 
-        // Apply state filter
+      for (const s of allCoops.values()) {
+        if (!matchesTypeFilter(s.capabilities)) continue;
         if (input.state && s.state !== input.state) continue;
+        if (query && !s.name.toLowerCase().includes(query)) continue;
 
-        // Apply name query
-        if (input.query) {
-          const q = input.query.toLowerCase();
-          if (!s.name.toLowerCase().includes(q)) continue;
-        }
-
-        const primaryType = s.capabilities[0] ?? 'tide';
         const entry: StationResult = {
           station_id: s.id,
           name: s.name,
           source: 'coops',
-          type: primaryType,
+          type: primaryTypeFor(s.capabilities),
           latitude: s.lat,
           longitude: s.lng,
           capabilities: s.capabilities,
         };
         if (s.state) entry.state = s.state;
 
-        if (hasLatLon && lat !== undefined && lon !== undefined) {
-          const dist = haversineKm(lat, lon, s.lat, s.lng);
+        if (center) {
+          const dist = haversineKm(center.lat, center.lon, s.lat, s.lng);
           if (dist > input.radius_km) continue;
           entry.distance_km = Math.round(dist * 10) / 10;
         }
@@ -328,38 +348,31 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
     // Process NDBC stations
     if (ndbcResult.status === 'fulfilled' && ndbcResult.value) {
       for (const s of ndbcResult.value) {
-        // Apply type filter
-        if (input.types && input.types.length > 0) {
-          const hasMatch = input.types.some(
-            (t) =>
-              (t === 'buoy' || t === 'met') && (s.hasMet || s.type?.toLowerCase().includes('buoy')),
-          );
-          if (!hasMatch) continue;
-        }
-
-        // Apply name query
-        if (input.query) {
-          const q = input.query.toLowerCase();
-          if (!s.name.toLowerCase().includes(q) && !s.id.toLowerCase().includes(q)) continue;
-        }
-
+        // Derive capabilities from the NDBC flags BEFORE filtering, so the filter and the
+        // reported capabilities read the same array. The station's `type` attribute is a
+        // platform classification (buoy/fixed/oilrig/dart/…), not a capability — matching
+        // it against a `met` filter admits buoys NDBC flags as met="n".
         const capabilities: string[] = [];
         if (s.hasMet) capabilities.push('met');
         if (s.hasCurrents) capabilities.push('currents');
         if (capabilities.length === 0) capabilities.push('buoy');
 
+        if (!matchesTypeFilter(capabilities)) continue;
+        if (query && !s.name.toLowerCase().includes(query) && !s.id.toLowerCase().includes(query))
+          continue;
+
         const entry: StationResult = {
           station_id: s.id,
           name: s.name,
           source: 'ndbc',
-          type: 'buoy',
+          type: primaryTypeFor(capabilities),
           latitude: s.lat,
           longitude: s.lon,
           capabilities,
         };
 
-        if (hasLatLon && lat !== undefined && lon !== undefined) {
-          const dist = haversineKm(lat, lon, s.lat, s.lon);
+        if (center) {
+          const dist = haversineKm(center.lat, center.lon, s.lat, s.lon);
           if (dist > input.radius_km) continue;
           entry.distance_km = Math.round(dist * 10) / 10;
         }
@@ -369,7 +382,7 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
     }
 
     // Sort: by distance if lat/lon provided, otherwise by name
-    if (hasLatLon) {
+    if (center) {
       results.sort((a, b) => (a.distance_km ?? 9999) - (b.distance_km ?? 9999));
     } else {
       results.sort((a, b) => a.name.localeCompare(b.name));

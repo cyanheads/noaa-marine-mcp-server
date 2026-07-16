@@ -185,6 +185,52 @@ describe('noaaMarineGetConditions', () => {
     expect(result.longitude).toBe(0);
   });
 
+  // --- #11: discovery guidance must not route callers back to the failing search ---
+
+  it('points every recovery path at a capability-filtered NDBC search', () => {
+    const recoveries = noaaMarineGetConditions.errors!.map((e) => e.recovery);
+    expect(recoveries).toHaveLength(2);
+    for (const recovery of recoveries) {
+      expect(recovery).toContain('noaa_marine_find_stations');
+      expect(recovery).toContain('types=["met"]');
+    }
+  });
+
+  it('does not advertise an unfiltered NDBC search as the way to find station IDs', () => {
+    const surfaces = [
+      noaaMarineGetConditions.description,
+      ...noaaMarineGetConditions.errors!.map((e) => e.recovery),
+    ];
+    for (const text of surfaces) {
+      // The circular guidance was a bare source="ndbc" pointer with no capability filter.
+      const pointers = text!.match(/source="ndbc"(?!\s+and\s+types)/g) ?? [];
+      expect(pointers).toEqual([]);
+    }
+  });
+
+  it('names the met filter in the buoy_not_found message, not just the recovery', async () => {
+    const ctx = createMockContext({ errors: noaaMarineGetConditions.errors });
+    const { getNdbcService } = await import('@/services/ndbc/ndbc-service.js');
+    const svc = getNdbcService();
+    vi.spyOn(svc, 'getActiveStations').mockResolvedValue([]);
+    const { notFound } = await import('@cyanheads/mcp-ts-core/errors');
+    vi.spyOn(svc, 'fetchObservation').mockRejectedValue(notFound('HTTP 404', { statusCode: 404 }));
+
+    const input = noaaMarineGetConditions.input.parse({ station_id: 'EBSW1' });
+    const err = await noaaMarineGetConditions.handler(input, ctx).catch((e: unknown) => e);
+
+    // Sibling tools already name the capability filter in the message — match them, so the
+    // message cannot send a caller back to the unfiltered search that produced the bad ID.
+    expect((err as Error).message).toContain('types=["met"]');
+    expect((err as Error).message).not.toMatch(/noaa_marine_find_stations\.$/);
+  });
+
+  it('carries the met caveat rather than promising conditions data', () => {
+    // hasMet is a strong but imperfect predictor — station 44033 is flagged met="n" and
+    // still serves live wind/air-temp. The description must not overpromise.
+    expect(noaaMarineGetConditions.description).toContain('most likely');
+  });
+
   it('format renders station name, observation timestamp, and sensor values', () => {
     const output = {
       station_id: '46041',
