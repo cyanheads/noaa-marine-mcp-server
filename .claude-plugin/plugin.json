@@ -1,6 +1,6 @@
 {
   "name": "noaa-marine-mcp-server",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Find NOAA tide stations and NDBC buoys, fetch tide predictions, water levels, tidal currents, and live buoy conditions via MCP. STDIO or Streamable HTTP.",
   "author": {
     "name": "cyanheads"

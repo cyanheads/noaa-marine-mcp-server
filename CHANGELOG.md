@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.7](changelog/0.1.x/0.1.7.md) — 2026-07-15 · 🛡️ Security
+
+Four bug fixes: noaa_marine_find_stations rejects incomplete lat/lon pairs, fixes its NDBC met filter and type field; noaa_marine_get_conditions guidance now points at conditions-capable stations; mcp-ts-core ^0.10.14, supply-chain hardening
+
 ## [0.1.6](changelog/0.1.x/0.1.6.md) — 2026-06-30
 
 Four bug fixes: CO-OPS invalid/reversed date ranges validate locally as invalid_date_range instead of station_not_found, sensorless buoys keep no_sensor_data, a state filter excludes state-less NDBC buoys, and blank NDBC names become NDBC <id> labels; dev-dependency refresh
