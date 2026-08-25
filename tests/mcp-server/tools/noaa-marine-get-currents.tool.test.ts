@@ -118,8 +118,8 @@ describe('noaaMarineGetCurrents', () => {
     const result = await noaaMarineGetCurrents.handler(input, ctx);
 
     expect(result.predictions).toHaveLength(2);
-    expect(result.predictions![0].direction).toBeNull();
-    expect(result.predictions![1].direction).toBeNull();
+    expect(result.predictions?.[0]?.direction).toBeNull();
+    expect(result.predictions?.[1]?.direction).toBeNull();
   });
 
   it('throws ctx.fail("date_range_exceeded") for range > 365 days', async () => {
@@ -184,9 +184,9 @@ describe('noaaMarineGetCurrents', () => {
     const svc = getCoopsService();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     vi.spyOn(svc, 'getStations').mockResolvedValue([] as any);
-    // CO-OPS returns HTTP 400 for invalid station IDs — simulate with McpError + statusCode
+    // CO-OPS returns HTTP 400 for invalid station IDs — simulate with McpError + status
     vi.spyOn(svc, 'fetchCurrentPredictions').mockRejectedValue(
-      new McpError(JsonRpcErrorCode.InvalidParams, 'CO-OPS fetch failed', { statusCode: 400 }),
+      new McpError(JsonRpcErrorCode.InvalidParams, 'CO-OPS fetch failed', { status: 400 }),
     );
 
     const input = noaaMarineGetCurrents.input.parse({

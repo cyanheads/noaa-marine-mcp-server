@@ -19,6 +19,7 @@ export const noaaMarineStationResource = resource('noaa-marine://station/{statio
     'NDBC station IDs are 5-character alphanumeric codes. ' +
     'Use noaa_marine_find_stations to discover station IDs.',
   mimeType: 'application/json',
+  cacheHint: { ttlMs: 21_600_000, cacheScope: 'public' },
   params: z.object({
     station_id: z
       .string()

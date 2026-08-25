@@ -5,7 +5,7 @@
 
 import type { Context } from '@cyanheads/mcp-ts-core';
 import { notFound, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
-import { fetchWithTimeout, type RequestContext, withRetry } from '@cyanheads/mcp-ts-core/utils';
+import { fetchWithTimeout, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import type {
   NdbcCurrentBin,
   NdbcCurrentProfile,
@@ -40,12 +40,9 @@ export class NdbcService {
 
     const stations = await withRetry(
       async () => {
-        const response = await fetchWithTimeout(
-          ACTIVE_STATIONS_URL,
-          20_000,
-          ctx as unknown as RequestContext,
-          { signal: ctx.signal },
-        );
+        const response = await fetchWithTimeout(ACTIVE_STATIONS_URL, 20_000, ctx, {
+          signal: ctx.signal,
+        });
         const text = await response.text();
         if (/^\s*<(!DOCTYPE\s+html|html[\s>])/i.test(text)) {
           throw serviceUnavailable('NDBC active stations returned HTML — service may be down.');
@@ -54,7 +51,7 @@ export class NdbcService {
       },
       {
         operation: 'NdbcService.getActiveStations',
-        context: ctx as unknown as RequestContext,
+        context: ctx,
         baseDelayMs: 2000,
         maxRetries: 2,
         signal: ctx.signal,
@@ -76,7 +73,7 @@ export class NdbcService {
     return await withRetry(
       async () => {
         const url = REALTIME_URL(stationId);
-        const response = await fetchWithTimeout(url, 10_000, ctx as unknown as RequestContext, {
+        const response = await fetchWithTimeout(url, 10_000, ctx, {
           signal: ctx.signal,
         });
 
@@ -89,7 +86,7 @@ export class NdbcService {
       },
       {
         operation: `NdbcService.fetchObservation(${stationId})`,
-        context: ctx as unknown as RequestContext,
+        context: ctx,
         baseDelayMs: 1000,
         maxRetries: 2,
         signal: ctx.signal,
@@ -102,7 +99,7 @@ export class NdbcService {
     return await withRetry(
       async () => {
         const url = ADCP_URL(stationId);
-        const response = await fetchWithTimeout(url, 10_000, ctx as unknown as RequestContext, {
+        const response = await fetchWithTimeout(url, 10_000, ctx, {
           signal: ctx.signal,
         });
 
@@ -115,7 +112,7 @@ export class NdbcService {
       },
       {
         operation: `NdbcService.fetchCurrentProfile(${stationId})`,
-        context: ctx as unknown as RequestContext,
+        context: ctx,
         baseDelayMs: 1000,
         maxRetries: 2,
         signal: ctx.signal,
@@ -128,7 +125,7 @@ export class NdbcService {
     return await withRetry(
       async () => {
         const url = OCEAN_URL(stationId);
-        const response = await fetchWithTimeout(url, 10_000, ctx as unknown as RequestContext, {
+        const response = await fetchWithTimeout(url, 10_000, ctx, {
           signal: ctx.signal,
         });
 
@@ -141,7 +138,7 @@ export class NdbcService {
       },
       {
         operation: `NdbcService.fetchOceanObservations(${stationId})`,
-        context: ctx as unknown as RequestContext,
+        context: ctx,
         baseDelayMs: 1000,
         maxRetries: 2,
         signal: ctx.signal,

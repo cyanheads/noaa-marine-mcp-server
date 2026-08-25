@@ -194,8 +194,8 @@ export const noaaMarineGetCurrents = tool('noaa_marine_get_currents', {
       }
       // CO-OPS HTTP 400 — invalid station ID before response body is parsed.
       if (err instanceof McpError) {
-        const statusCode = (err.data as Record<string, unknown> | undefined)?.statusCode;
-        if (statusCode === 400) {
+        const status = (err.data as Record<string, unknown> | undefined)?.status;
+        if (status === 400) {
           throw ctx.fail(
             'station_not_found',
             `CO-OPS rejected station ${input.station_id} — current stations need alphanumeric IDs. Use noaa_marine_find_stations with types=["current"].`,

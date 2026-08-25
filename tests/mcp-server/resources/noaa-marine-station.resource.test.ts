@@ -75,7 +75,7 @@ describe('noaaMarineStationResource', () => {
     });
     vi.spyOn(getNdbcService(), 'getActiveStations').mockResolvedValue([]);
 
-    const params = noaaMarineStationResource.params.parse({ station_id: '9447130' });
+    const params = noaaMarineStationResource.params!.parse({ station_id: '9447130' });
     const result = (await noaaMarineStationResource.handler(params, ctx)) as Record<
       string,
       unknown
@@ -104,7 +104,7 @@ describe('noaaMarineStationResource', () => {
     vi.spyOn(getCoopsService(), 'getStations').mockResolvedValue([]);
     vi.spyOn(getNdbcService(), 'getActiveStations').mockResolvedValue([NDBC_BUOY]);
 
-    const params = noaaMarineStationResource.params.parse({ station_id: '46041' });
+    const params = noaaMarineStationResource.params!.parse({ station_id: '46041' });
     const result = (await noaaMarineStationResource.handler(params, ctx)) as Record<
       string,
       unknown
@@ -131,7 +131,7 @@ describe('noaaMarineStationResource', () => {
     vi.spyOn(getCoopsService(), 'getStations').mockResolvedValue([]);
     vi.spyOn(getNdbcService(), 'getActiveStations').mockResolvedValue([NDBC_BUOY]);
 
-    const params = noaaMarineStationResource.params.parse({ station_id: '46041' });
+    const params = noaaMarineStationResource.params!.parse({ station_id: '46041' });
     const result = await noaaMarineStationResource.handler(params, ctx);
     expect(result).toMatchObject({ station_id: '46041' });
   });
@@ -144,7 +144,7 @@ describe('noaaMarineStationResource', () => {
     vi.spyOn(getCoopsService(), 'getStations').mockResolvedValue([]);
     vi.spyOn(getNdbcService(), 'getActiveStations').mockResolvedValue([]);
 
-    const params = noaaMarineStationResource.params.parse({ station_id: 'NOSUCHSTATION' });
+    const params = noaaMarineStationResource.params!.parse({ station_id: 'NOSUCHSTATION' });
     await expect(noaaMarineStationResource.handler(params, ctx)).rejects.toMatchObject({
       code: JsonRpcErrorCode.NotFound,
     });
@@ -163,7 +163,7 @@ describe('noaaMarineStationResource', () => {
     });
     vi.spyOn(getNdbcService(), 'getActiveStations').mockResolvedValue([]);
 
-    const params = noaaMarineStationResource.params.parse({ station_id: 'PUG1616' });
+    const params = noaaMarineStationResource.params!.parse({ station_id: 'PUG1616' });
     const result = (await noaaMarineStationResource.handler(params, ctx)) as Record<
       string,
       unknown
@@ -180,7 +180,7 @@ describe('noaaMarineStationResource', () => {
     vi.spyOn(getCoopsService(), 'getStations').mockResolvedValue([]);
     vi.spyOn(getNdbcService(), 'getActiveStations').mockResolvedValue([NDBC_BUOY]);
 
-    const params = noaaMarineStationResource.params.parse({ station_id: '46041' });
+    const params = noaaMarineStationResource.params!.parse({ station_id: '46041' });
     const result = (await noaaMarineStationResource.handler(params, ctx)) as Record<
       string,
       unknown
@@ -196,7 +196,7 @@ describe('noaaMarineStationResource', () => {
     vi.spyOn(getCoopsService(), 'getStations').mockResolvedValue([]);
     vi.spyOn(getNdbcService(), 'getActiveStations').mockResolvedValue([NDBC_FIXED_PLATFORM]);
 
-    const params = noaaMarineStationResource.params.parse({ station_id: 'SANF1' });
+    const params = noaaMarineStationResource.params!.parse({ station_id: 'SANF1' });
     const result = (await noaaMarineStationResource.handler(params, ctx)) as Record<
       string,
       unknown
@@ -217,7 +217,7 @@ describe('noaaMarineStationResource', () => {
     vi.spyOn(getCoopsService(), 'getStations').mockResolvedValue([]);
     vi.spyOn(getNdbcService(), 'getActiveStations').mockResolvedValue([NDBC_CURRENTS]);
 
-    const params = noaaMarineStationResource.params.parse({ station_id: '44033' });
+    const params = noaaMarineStationResource.params!.parse({ station_id: '44033' });
     const result = (await noaaMarineStationResource.handler(params, ctx)) as Record<
       string,
       unknown

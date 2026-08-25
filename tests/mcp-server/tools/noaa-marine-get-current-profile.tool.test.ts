@@ -70,10 +70,8 @@ describe('noaaMarineGetCurrentProfile', () => {
     vi.spyOn(svc, 'getActiveStations').mockResolvedValue([]);
 
     const { notFound } = await import('@cyanheads/mcp-ts-core/errors');
-    // fetchWithTimeout throws a bare 404 (statusCode, no reason) before the service's own check.
-    vi.spyOn(svc, 'fetchCurrentProfile').mockRejectedValue(
-      notFound('HTTP 404', { statusCode: 404 }),
-    );
+    // fetchWithTimeout throws a bare 404 (status, no reason) before the service's own check.
+    vi.spyOn(svc, 'fetchCurrentProfile').mockRejectedValue(notFound('HTTP 404', { status: 404 }));
 
     const input = noaaMarineGetCurrentProfile.input.parse({ station_id: 'ZZZZZ' });
     await expect(noaaMarineGetCurrentProfile.handler(input, ctx)).rejects.toMatchObject({

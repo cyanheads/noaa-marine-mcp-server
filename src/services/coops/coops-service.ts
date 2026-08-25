@@ -7,7 +7,7 @@ import type { Context } from '@cyanheads/mcp-ts-core';
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
 import { JsonRpcErrorCode, McpError, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
-import { fetchWithTimeout, type RequestContext, withRetry } from '@cyanheads/mcp-ts-core/utils';
+import { fetchWithTimeout, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import type { ServerConfig } from '@/config/server-config.js';
 import type {
   CoopsCurrent6MinRow,
@@ -78,7 +78,7 @@ export class CoopsService {
     const stations = await withRetry(
       async () => {
         const url = `${MDAPI_URL}?type=${type}&application=${encodeURIComponent(this.applicationId)}`;
-        const response = await fetchWithTimeout(url, 15_000, ctx as unknown as RequestContext, {
+        const response = await fetchWithTimeout(url, 15_000, ctx, {
           signal: ctx.signal,
         });
         const text = await response.text();
@@ -88,7 +88,7 @@ export class CoopsService {
       },
       {
         operation: `CoopsService.getStations(${type})`,
-        context: ctx as unknown as RequestContext,
+        context: ctx,
         baseDelayMs: 2000,
         maxRetries: 2,
         signal: ctx.signal,
@@ -139,7 +139,7 @@ export class CoopsService {
           interval: apiInterval,
           format: 'json',
         });
-        const response = await fetchWithTimeout(url, 20_000, ctx as unknown as RequestContext, {
+        const response = await fetchWithTimeout(url, 20_000, ctx, {
           signal: ctx.signal,
         });
         const text = await response.text();
@@ -152,7 +152,7 @@ export class CoopsService {
       },
       {
         operation: 'CoopsService.fetchTidePredictions',
-        context: ctx as unknown as RequestContext,
+        context: ctx,
         baseDelayMs: 1000,
         maxRetries: 3,
         signal: ctx.signal,
@@ -184,7 +184,7 @@ export class CoopsService {
           units: params.units,
           format: 'json',
         });
-        const response = await fetchWithTimeout(url, 20_000, ctx as unknown as RequestContext, {
+        const response = await fetchWithTimeout(url, 20_000, ctx, {
           signal: ctx.signal,
         });
         const text = await response.text();
@@ -195,7 +195,7 @@ export class CoopsService {
       },
       {
         operation: 'CoopsService.fetchWaterLevel',
-        context: ctx as unknown as RequestContext,
+        context: ctx,
         baseDelayMs: 1000,
         maxRetries: 3,
         signal: ctx.signal,
@@ -228,7 +228,7 @@ export class CoopsService {
           interval: '6',
           format: 'json',
         });
-        const response = await fetchWithTimeout(url, 20_000, ctx as unknown as RequestContext, {
+        const response = await fetchWithTimeout(url, 20_000, ctx, {
           signal: ctx.signal,
         });
         const text = await response.text();
@@ -240,7 +240,7 @@ export class CoopsService {
       },
       {
         operation: 'CoopsService.fetchWaterLevelPredictions',
-        context: ctx as unknown as RequestContext,
+        context: ctx,
         baseDelayMs: 1000,
         maxRetries: 2,
         signal: ctx.signal,
@@ -278,7 +278,7 @@ export class CoopsService {
           interval: apiInterval,
           format: 'json',
         });
-        const response = await fetchWithTimeout(url, 20_000, ctx as unknown as RequestContext, {
+        const response = await fetchWithTimeout(url, 20_000, ctx, {
           signal: ctx.signal,
         });
         const text = await response.text();
@@ -297,7 +297,7 @@ export class CoopsService {
       },
       {
         operation: 'CoopsService.fetchCurrentPredictions',
-        context: ctx as unknown as RequestContext,
+        context: ctx,
         baseDelayMs: 1000,
         maxRetries: 3,
         signal: ctx.signal,

@@ -239,9 +239,9 @@ describe('noaaMarineFindStations', () => {
     vi.spyOn(getCoopsService(), 'getStations').mockImplementation(async (type) => {
       if (type === 'currentpredictions') {
         return [
-          { ...COOPS_TIDE_STATION, id: 'PUG1616', state: undefined },
-          { ...COOPS_TIDE_STATION, id: 'PUG1616', state: undefined },
-          { ...COOPS_TIDE_STATION, id: 'PUG1616', state: undefined },
+          { ...COOPS_TIDE_STATION, id: 'PUG1616' },
+          { ...COOPS_TIDE_STATION, id: 'PUG1616' },
+          { ...COOPS_TIDE_STATION, id: 'PUG1616' },
         ];
       }
       return [];
@@ -262,7 +262,9 @@ describe('noaaMarineFindStations', () => {
     await mockCatalog({ tidepredictions: [COOPS_TIDE_STATION] }, [NDBC_BUOY]);
 
     const input = noaaMarineFindStations.input.parse({ latitude: 47.6, limit: 3 });
-    const err = await noaaMarineFindStations.handler(input, ctx).catch((e: unknown) => e);
+    const err = await Promise.resolve(noaaMarineFindStations.handler(input, ctx)).catch(
+      (e: unknown) => e,
+    );
 
     expect(err).toMatchObject({
       code: JsonRpcErrorCode.InvalidParams,
@@ -276,7 +278,9 @@ describe('noaaMarineFindStations', () => {
     await mockCatalog({ tidepredictions: [COOPS_TIDE_STATION] }, [NDBC_BUOY]);
 
     const input = noaaMarineFindStations.input.parse({ longitude: -122.33, limit: 3 });
-    const err = await noaaMarineFindStations.handler(input, ctx).catch((e: unknown) => e);
+    const err = await Promise.resolve(noaaMarineFindStations.handler(input, ctx)).catch(
+      (e: unknown) => e,
+    );
 
     expect(err).toMatchObject({
       code: JsonRpcErrorCode.InvalidParams,

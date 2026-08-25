@@ -5,6 +5,7 @@
 
 import { beforeEach, describe, expect, it } from 'vitest';
 import { NdbcService } from '@/services/ndbc/ndbc-service.js';
+import type { NdbcStation } from '@/services/ndbc/types.js';
 
 const makeService = () => new NdbcService();
 
@@ -157,9 +158,7 @@ describe('NdbcService.parseActiveStationsXml', () => {
    *  we cast through unknown to access it for unit tests. */
   function parseXml(xml: string) {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return (svc as any).parseActiveStationsXml(xml) as ReturnType<
-      (typeof svc)['parseRealtimeText']
-    >[];
+    return (svc as any).parseActiveStationsXml(xml) as NdbcStation[];
   }
 
   it('parses a minimal Station element', () => {

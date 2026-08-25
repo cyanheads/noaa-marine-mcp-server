@@ -187,8 +187,8 @@ export const noaaMarineGetTidePredictions = tool('noaa_marine_get_tide_predictio
       }
       // CO-OPS HTTP 400 — invalid/unknown station ID before response body is parsed.
       if (err instanceof McpError) {
-        const statusCode = (err.data as Record<string, unknown> | undefined)?.statusCode;
-        if (statusCode === 400) {
+        const status = (err.data as Record<string, unknown> | undefined)?.status;
+        if (status === 400) {
           throw ctx.fail(
             'station_not_found',
             `CO-OPS rejected station ${input.station_id} — use noaa_marine_find_stations with types=["tide"] to verify the ID.`,

@@ -158,8 +158,8 @@ describe('noaaMarineGetConditions', () => {
     vi.spyOn(svc, 'getActiveStations').mockResolvedValue([]);
 
     const { notFound } = await import('@cyanheads/mcp-ts-core/errors');
-    // fetchWithTimeout throws a 404 before the service's own check runs: statusCode, no reason.
-    vi.spyOn(svc, 'fetchObservation').mockRejectedValue(notFound('HTTP 404', { statusCode: 404 }));
+    // fetchWithTimeout throws a 404 before the service's own check runs: status, no reason.
+    vi.spyOn(svc, 'fetchObservation').mockRejectedValue(notFound('HTTP 404', { status: 404 }));
 
     const input = noaaMarineGetConditions.input.parse({ station_id: 'ZZZZZ' });
     await expect(noaaMarineGetConditions.handler(input, ctx)).rejects.toMatchObject({
@@ -214,10 +214,12 @@ describe('noaaMarineGetConditions', () => {
     const svc = getNdbcService();
     vi.spyOn(svc, 'getActiveStations').mockResolvedValue([]);
     const { notFound } = await import('@cyanheads/mcp-ts-core/errors');
-    vi.spyOn(svc, 'fetchObservation').mockRejectedValue(notFound('HTTP 404', { statusCode: 404 }));
+    vi.spyOn(svc, 'fetchObservation').mockRejectedValue(notFound('HTTP 404', { status: 404 }));
 
     const input = noaaMarineGetConditions.input.parse({ station_id: 'EBSW1' });
-    const err = await noaaMarineGetConditions.handler(input, ctx).catch((e: unknown) => e);
+    const err = await Promise.resolve(noaaMarineGetConditions.handler(input, ctx)).catch(
+      (e: unknown) => e,
+    );
 
     // Sibling tools already name the capability filter in the message — match them, so the
     // message cannot send a caller back to the unfiltered search that produced the bad ID.

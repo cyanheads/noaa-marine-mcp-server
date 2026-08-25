@@ -117,7 +117,7 @@ export const noaaMarineGetConditions = tool('noaa_marine_get_conditions', {
       obs = await ndbcSvc.fetchObservation(input.station_id, ctx);
     } catch (err) {
       // Both a genuine missing buoy and an offline/sensor-failure buoy surface as
-      // code NotFound: fetchWithTimeout throws a bare 404 (data.statusCode: 404, no
+      // code NotFound: fetchWithTimeout throws a bare 404 (data.status: 404, no
       // reason) before the service's own check runs, while the service's notFound()
       // for an existing-but-empty file carries data.reason: 'no_sensor_data'. Inspect
       // the reason so a sensorless buoy isn't mislabeled as an invalid station ID.

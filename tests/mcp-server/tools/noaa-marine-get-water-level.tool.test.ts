@@ -119,9 +119,9 @@ describe('noaaMarineGetWaterLevel', () => {
     const ctx = createMockContext({ errors: noaaMarineGetWaterLevel.errors });
 
     const { getCoopsService } = await import('@/services/coops/coops-service.js');
-    // CO-OPS returns HTTP 400 for invalid station IDs — simulate with McpError + statusCode
+    // CO-OPS returns HTTP 400 for invalid station IDs — simulate with McpError + status
     vi.spyOn(getCoopsService(), 'fetchWaterLevel').mockRejectedValue(
-      new McpError(JsonRpcErrorCode.InvalidParams, 'CO-OPS fetch failed', { statusCode: 400 }),
+      new McpError(JsonRpcErrorCode.InvalidParams, 'CO-OPS fetch failed', { status: 400 }),
     );
 
     const input = noaaMarineGetWaterLevel.input.parse({

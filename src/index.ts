@@ -31,6 +31,11 @@ await createApp({
   ],
   resources: [noaaMarineStationResource],
   prompts: [],
+  cacheHints: {
+    'tools/list': { ttlMs: 86_400_000, cacheScope: 'public' },
+    'resources/list': { ttlMs: 86_400_000, cacheScope: 'public' },
+    'resources/templates/list': { ttlMs: 86_400_000, cacheScope: 'public' },
+  },
   instructions:
     'US marine conditions via NOAA CO-OPS and NDBC. ' +
     'Start with noaa_marine_find_stations to resolve a location or name to station IDs, ' +

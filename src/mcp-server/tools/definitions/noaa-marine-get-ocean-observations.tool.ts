@@ -146,7 +146,7 @@ export const noaaMarineGetOceanObservations = tool('noaa_marine_get_ocean_observ
       observation = await ndbcSvc.fetchOceanObservations(input.station_id, ctx);
     } catch (err) {
       // A missing .ocean file and an existing-but-empty one both surface as NotFound:
-      // fetchWithTimeout throws a bare 404 (data.statusCode: 404, no reason) before the
+      // fetchWithTimeout throws a bare 404 (data.status: 404, no reason) before the
       // service's own check runs, while the service's notFound() for an existing-but-empty
       // file carries data.reason: 'no_ocean_data'. Inspect the reason so an offline station
       // isn't mislabeled as one that serves no ocean data at all.

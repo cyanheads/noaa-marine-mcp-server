@@ -98,7 +98,7 @@ export const noaaMarineGetCurrentProfile = tool('noaa_marine_get_current_profile
       profile = await ndbcSvc.fetchCurrentProfile(input.station_id, ctx);
     } catch (err) {
       // A missing ADCP file and an empty/offline profiler both surface as NotFound:
-      // fetchWithTimeout throws a bare 404 (data.statusCode: 404, no reason) before the
+      // fetchWithTimeout throws a bare 404 (data.status: 404, no reason) before the
       // service's own check runs, while the service's notFound() for an existing-but-empty
       // file carries data.reason: 'no_current_data'. Inspect the reason so an offline
       // profiler isn't mislabeled as a station that serves no ADCP data at all.
