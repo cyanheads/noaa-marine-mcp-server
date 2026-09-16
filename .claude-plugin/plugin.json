@@ -1,20 +1,39 @@
 {
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "noaa-marine-mcp-server",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Find NOAA tide stations and NDBC buoys, fetch tide predictions, water levels, tidal currents, and live buoy conditions via MCP. STDIO or Streamable HTTP.",
   "author": {
-    "name": "cyanheads"
+    "name": "cyanheads",
+    "email": "casey@caseyjhand.com",
+    "url": "https://github.com/cyanheads"
   },
   "homepage": "https://github.com/cyanheads/noaa-marine-mcp-server#readme",
   "repository": "git+https://github.com/cyanheads/noaa-marine-mcp-server.git",
   "license": "Apache-2.0",
+  "keywords": [
+    "noaa",
+    "marine",
+    "tides",
+    "ndbc",
+    "buoy",
+    "co-ops",
+    "water-level",
+    "currents",
+    "coastal",
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "typescript",
+    "bun",
+    "stdio",
+    "streamable-http",
+    "ai-agent"
+  ],
   "mcpServers": {
     "noaa-marine-mcp-server": {
       "command": "npx",
-      "args": [
-        "-y",
-        "@cyanheads/noaa-marine-mcp-server"
-      ],
+      "args": ["-y", "@cyanheads/noaa-marine-mcp-server"],
       "env": {
         "MCP_TRANSPORT_TYPE": "stdio"
       }

@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.2](changelog/0.3.x/0.3.2.md) — 2026-09-16
+
+Adopts mcp-ts-core 0.13.2: sessionMode is declared in src/index.ts rather than left to MCP_SESSION_MODE, argument rejections carry the structured error envelope, a CO-OPS/NDBC 500 now retries, and the framework skill tree moves to framework-skills/.
+
 ## [0.3.1](changelog/0.3.x/0.3.1.md) — 2026-08-24
 
 Adopts mcp-ts-core 0.12.3 with MCP 2026-07-28 compatibility, strict tool inputs, cache hints, and an explicit stateless HTTP default

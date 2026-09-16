@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.3.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/noaa-marine-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/noaa-marine-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/noaa-marine-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.3.2-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/noaa-marine-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/noaa-marine-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/noaa-marine-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -27,128 +27,120 @@
 
 ---
 
-## Tools
+## Overview
 
-Seven tools covering the full US marine operational workflow — station discovery, tide predictions, observed water levels, tidal current predictions and profiles, and live offshore buoy conditions:
+US tide, current, and buoy data from NOAA CO-OPS and NDBC. Find tide, water-level, and current stations plus NDBC buoys, then fetch tide predictions, observed water levels, tidal currents, and live buoy conditions from any MCP client. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
+
+### Tools
 
 | Tool | Description |
 |:-----|:------------|
-| `noaa_marine_find_stations` | Find CO-OPS tide/water-level/current stations and NDBC buoys near a location or by name/state. Required first step to resolve place names or coordinates to station IDs. |
-| `noaa_marine_get_tide_predictions` | High/low tide predictions for a CO-OPS tide station over a date range. Supports 6-minute interval output and multiple datums (defaults to MLLW — US nautical chart standard). |
-| `noaa_marine_get_water_level` | Observed water level (real-time or historical) for a CO-OPS station, paired with predictions to compute storm surge or anomalous drawdown. |
-| `noaa_marine_get_currents` | Tidal current predictions for a CO-OPS current station: max flood/ebb speeds, slack times, and directions. Defaults to MAX_SLACK (practical passage-planning view). |
-| `noaa_marine_get_conditions` | Live marine conditions from an NDBC buoy: wave height/period/direction, wind, sea-surface temp, air temp, and barometric pressure. |
-| `noaa_marine_get_current_profile` | Observed ocean-current depth profile from an NDBC ADCP buoy: speed and direction at each depth bin. Distinct from `noaa_marine_get_currents`, which is a CO-OPS tidal-current forecast. |
-| `noaa_marine_get_ocean_observations` | Sub-surface water-column observations from an NDBC station: water temperature, salinity, dissolved oxygen, chlorophyll, turbidity, and pH at each reported depth. The water-column counterpart to `noaa_marine_get_conditions` (surface weather and sea state). |
+| `noaa_marine_find_stations` | Find CO-OPS tide/water-level/current stations and NDBC buoys by location, name, state, or data capability. |
+| `noaa_marine_get_tide_predictions` | High/low tide predictions or a 6-minute curve for a CO-OPS tide station. |
+| `noaa_marine_get_water_level` | Observed water level paired with predictions for a CO-OPS station, with a storm-surge residual summary. |
+| `noaa_marine_get_currents` | CO-OPS tidal current predictions — max flood/ebb/slack events or a 6-minute curve. |
+| `noaa_marine_get_conditions` | Live NDBC buoy conditions: waves, wind, sea-surface and air temperature, pressure. |
+| `noaa_marine_get_current_profile` | Observed ocean-current depth profile from an NDBC ADCP buoy. |
+| `noaa_marine_get_ocean_observations` | Sub-surface water-column observations (temperature, salinity, oxygen, and more) from an NDBC station. |
 
-### `noaa_marine_find_stations`
+### Resources
 
-Unified station discovery across CO-OPS (3,450+ tide/water-level stations, 4,430+ current stations) and NDBC (1,354+ active buoys worldwide).
+| Resource | Description |
+|:---|:---|
+| `noaa-marine://station/{station_id}` | Metadata for a CO-OPS or NDBC station by ID: name, coordinates, source, data capabilities, and — for NDBC — physical platform class. |
 
-- Filter by proximity (latitude/longitude + radius), name substring, state/territory, source (CO-OPS vs NDBC), or `types`: data capabilities (tide, current, water_level, met, current_profile) or NDBC platform class (buoy)
-- Returns a unified station list with source, coordinates, distance, data capabilities, and — for NDBC — the physical platform class (buoy, fixed, oilrig, dart, tao, usv, other)
-- Station lists are cached in-memory (6-hour TTL) — first call after startup may be slightly slower
-- Required first step: CO-OPS and NDBC use non-overlapping ID systems; guessing a station ID reliably fails
+All resource data is also reachable via tools — use `noaa_marine_find_stations` to discover station IDs before accessing the resource.
+
+## Capability reference
+
+### `noaa_marine_find_stations` <sub>tool</sub>
+
+- Filter by proximity (`latitude`/`longitude` + `radius_km`, default 100 km, max 1000 km), name/ID substring, US state/territory (CO-OPS only), source (`coops`/`ndbc`/`all`), or `types`: data capabilities (`tide`, `current`, `water_level`, `met`, `current_profile`) or NDBC platform class (`buoy`)
+- Returns up to `limit` (default 20, max 200) unified stations with source, coordinates, distance, data capabilities, and — for NDBC — physical platform class (buoy, fixed, oilrig, dart, tao, usv, other)
+- `total_found` and `truncated` report the full match count before the limit is applied
+- Station lists are cached in-memory with a 6-hour TTL — first call after startup may be slightly slower
+- Typed `incomplete_coordinates` error when only one of latitude/longitude is supplied; `no_results` when nothing matches
 
 ---
 
-### `noaa_marine_get_tide_predictions`
+### `noaa_marine_get_tide_predictions` <sub>tool</sub>
 
-CO-OPS MLLW tide predictions for planning tidal windows.
-
-- High/low events (default) or 6-minute continuous curve
+- `hilo` (default, high/low events) or `6min` continuous curve; up to 1 year per request
 - Eight datums: MLLW (default, US nautical chart), MHHW, MSL, MTL, MHW, MLW, CD, STND
-- Time zone options: local standard/daylight (default), GMT, local standard only
-- Units: English (feet, default) or metric (meters)
-- Maximum date range: 1 year per request (typed error `date_range_exceeded` for longer ranges)
+- Time zone (`lst_ldt` default, `gmt`, `lst`) and units (`english` default feet, `metric` meters)
+- Typed `date_range_exceeded`, `invalid_date_range`, `station_not_found`, and `no_predictions` errors
 
 ---
 
-### `noaa_marine_get_water_level`
+### `noaa_marine_get_water_level` <sub>tool</sub>
 
-Observed water level vs. predicted — the storm surge view.
-
-- 6-minute observed water level readings with quality flags
-- Paired tide predictions fetched in parallel (failure degrades gracefully — observed levels still returned)
-- Optional residual summary: max surge and max drawdown when both series are present
-- Maximum date range: 31 days per request for 6-minute data
+- 6-minute observed water level with quality flags (`p` preliminary, `v` verified) and optional sensor `sigma`
+- Paired 6-minute tide predictions fetched in parallel — failure degrades gracefully, observed levels still return
+- `residual_summary` (max surge, max drawdown) only when both series are present
+- Up to 31 days per request; typed `date_range_exceeded`, `station_not_found`, and `no_data` errors
 
 ---
 
-### `noaa_marine_get_currents`
+### `noaa_marine_get_currents` <sub>tool</sub>
 
-CO-OPS tidal current predictions for passage planning.
-
-- MAX_SLACK interval (default): max flood, max ebb, and slack events only — the actionable view for transiting inlets and channels
-- 6-minute interval: full continuous current curve for charting or integration
-- Current station IDs use alphanumeric format (e.g., `ACT4176`), distinct from numeric tide station IDs — use `find_stations` with `types: ["current"]` to discover them
-
----
-
-### `noaa_marine_get_conditions`
-
-Live NDBC buoy observations (most recent ~45 days, updated every 10 minutes).
-
-- Wave height (m), dominant and average period (sec), mean wave direction
-- Wind speed and gust (m/s), wind direction
-- Sea-surface temperature, air temperature, dew point (°C)
-- Barometric pressure (hPa)
-- All sensor fields nullable (`null` when buoy sensor did not report — normal for offshore buoys)
-- All values in SI units except `TIDE` (feet) and `VIS` (nautical miles), which are rarely populated at offshore buoys
+- `MAX_SLACK` (default): max flood, max ebb, and slack events only — the actionable view for passage planning
+- `6min`: continuous current curve; units `english` (knots, default) or `metric` (m/s)
+- Current station IDs are alphanumeric (e.g. `ACT4176`), distinct from numeric tide/water-level IDs
+- Up to 1 year per request; typed `date_range_exceeded`, `invalid_date_range`, `station_not_found`, and `no_predictions` errors
 
 ---
 
-### `noaa_marine_get_current_profile`
+### `noaa_marine_get_conditions` <sub>tool</sub>
 
-Observed ocean-current depth profile from an NDBC ADCP buoy — the most recent measurement at each depth bin.
+- Wave height/period/direction, wind speed/gust/direction, sea-surface and air temperature, dew point, barometric pressure
+- All values SI except `tide_ft` (feet) and `visibility_nmi` (nautical miles), both rarely populated at offshore buoys
+- Every sensor field is nullable — `null` when the buoy did not report, never a fabricated value
+- Updated roughly every 10 minutes; typed `buoy_not_found` and `no_sensor_data` errors
 
-- Depth (m), direction (degrees true, the direction the current flows toward), and speed (cm/s) per bin
-- Distinct from `noaa_marine_get_currents`: this is an NDBC *observed* acoustic-Doppler measurement, not a CO-OPS tidal-current *prediction*
-- Most NDBC stations serve no ADCP profile — use `find_stations` with `source="ndbc"` and `types: ["current_profile"]` to discover the ones that do
-- Direction or speed is `null` for a bin when NDBC did not report that component
+---
 
-### `noaa_marine_get_ocean_observations`
+### `noaa_marine_get_current_profile` <sub>tool</sub>
 
-Sub-surface water-column observations from an NDBC station — the most recent reading at each reported depth.
+- Depth (m), direction (degrees true, flow-toward), and speed (cm/s) per bin, shallowest first
+- Observed NDBC ADCP measurement — distinct from `noaa_marine_get_currents`, a CO-OPS tidal-current *prediction*
+- Most NDBC stations serve no ADCP profile; use `find_stations` with `types: ["current_profile"]` to discover ones that do
+- Direction or speed is `null` per bin when the sensor did not report that component; typed `profile_not_found` and `no_current_data` errors
 
-- Water temperature (°C), conductivity (mS/cm), salinity (psu), dissolved oxygen (% saturation and ppm), chlorophyll (µg/l), turbidity (FTU), pH, and redox potential (mV) per depth
-- The water-column counterpart to `noaa_marine_get_conditions`: this reports what the water is doing below the surface, that one reports surface weather and sea state
-- Sensor coverage is sparse — most stations report only temperature and salinity; any value the station did not report comes back `null`, never a fabricated zero
-- Sub-surface sensors are on only a subset of NDBC stations and carry no station-catalog flag, so there is no capability filter — call it on candidate `source="ndbc"` station IDs and expect the `observations_not_found` error on the many stations that serve no ocean file
+---
 
-## Resources and prompts
+### `noaa_marine_get_ocean_observations` <sub>tool</sub>
 
-| Type | Name | Description |
-|:-----|:-----|:------------|
-| Resource | `noaa-marine://station/{station_id}` | Metadata for a CO-OPS or NDBC station by ID: name, coordinates, source, data capabilities, state, and — for NDBC — physical platform class. |
+- Water temperature, conductivity, salinity, dissolved oxygen (% and ppm), chlorophyll, turbidity, pH, and redox potential per depth
+- Water-column counterpart to `noaa_marine_get_conditions` (surface weather and sea state)
+- Sensor coverage is sparse — most stations report only temperature and salinity; unreported values are `null`, never a fabricated zero
+- No capability filter identifies ocean-sensor coverage — call on candidate `source="ndbc"` IDs and expect `observations_not_found` on stations with no `.ocean` file
 
-All resource data is also reachable via tools. Use `noaa_marine_find_stations` to discover station IDs before accessing the resource.
+---
+
+### `noaa-marine://station/{station_id}` <sub>resource</sub>
+
+- Station record as `application/json` — name, coordinates, source, capabilities, state, and (NDBC) platform class
+- `station_id` comes from `noaa_marine_find_stations`
+- Cached with a 6-hour TTL (`cacheHint`)
 
 ## Features
 
-Built on [`@cyanheads/mcp-ts-core`](https://www.npmjs.com/package/@cyanheads/mcp-ts-core):
+Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core): stdio and Streamable HTTP transports, pluggable auth (`none` / `jwt` / `oauth`), swappable storage (`in-memory`, `filesystem`, `Supabase`, `Cloudflare KV/R2/D1`), structured logging with optional OpenTelemetry tracing.
 
-- Declarative tool and resource definitions — single file per primitive, framework handles registration and validation
-- Unified error handling — handlers throw, framework catches, classifies, and formats with typed error contracts
-- Structured logging with optional OpenTelemetry tracing
-- STDIO and Streamable HTTP transports
-- MCP 2026 cache hints for static definition lists and station metadata
-- Pluggable auth: `none`, `jwt`, `oauth`
-
-NOAA-specific:
+CO-OPS / NDBC-specific:
 
 - In-memory station cache (6-hour TTL) for CO-OPS and NDBC station lists — discovery is fast after first startup
 - CO-OPS and NDBC integrated in a unified station model — `find_stations` fans out across both sources in parallel
-- NDBC fixed-width text parser: `MM` (missing sensor data) normalized to `null`, not passed through as strings
-- Paired water-level + prediction fetches for storm surge residual computation
+- NDBC fixed-width text parser normalizes `MM` (missing sensor data) to `null`, never passes it through as a string
+- Paired water-level and prediction fetches for storm-surge residual computation
 - CO-OPS `application=` courtesy parameter sent on every request (configurable via `NOAA_APPLICATION_ID`)
 
 Agent-friendly output:
 
-- Datum echoed on every tide/water-level response — agents can state units and reference correctly without assumptions
-- `total_found` on `find_stations` shows count before `limit` slice so agents know whether to re-query
-- All NDBC sensor fields explicitly nullable with per-field unit documentation — agents don't fabricate missing readings
-- Typed station source (`coops` | `ndbc`) on every station record, plus a data-capability `type` and (NDBC only) a `platform` class where applicable — agents can branch on data, not string parsing
+- Datum echoed on every tide/water-level response so agents state units and reference correctly without assumptions
+- `total_found` on `find_stations` shows the count before the `limit` slice, so agents know whether to re-query
+- All NDBC sensor fields explicitly nullable — agents don't fabricate missing readings
+- Typed station `source` (`coops` | `ndbc`) plus a data-capability `type` and (NDBC only) a `platform` class — agents branch on data, not string parsing
 
 ## Getting started
 
@@ -169,7 +161,7 @@ Connect directly via Streamable HTTP — no install, no API key:
 }
 ```
 
-### Self-hosted / local
+### Self-Hosted / Local
 
 Add the following to your MCP client configuration file:
 
@@ -272,7 +264,7 @@ cp .env.example .env
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
 | `MCP_HTTP_PORT` | Port for HTTP server. | `3010` |
 | `MCP_AUTH_MODE` | Auth mode: `none`, `jwt`, or `oauth`. | `none` |
-| `MCP_SESSION_MODE` | HTTP session mode: `auto`, `stateful`, or `stateless`. This server pins `stateless`; the framework's `auto` schema default resolves to `stateful`. | `stateless` |
+| `MCP_SESSION_MODE` | HTTP session mode: `auto`, `stateful`, or `stateless`. The server declares `stateless` in `src/index.ts`; set this to override. | `stateless` |
 | `MCP_LOG_LEVEL` | Log level (RFC 5424). | `info` |
 | `LOGS_DIR` | Directory for log files (Node.js only). | `<project-root>/logs` |
 | `OTEL_ENABLED` | Enable [OpenTelemetry instrumentation](https://github.com/cyanheads/mcp-ts-core/tree/main/docs/telemetry). | `false` |
@@ -335,7 +327,7 @@ See [`CLAUDE.md`/`AGENTS.md`](./CLAUDE.md) for development guidelines and archit
 
 ## Contributing
 
-Issues and pull requests are welcome. Run checks and tests before submitting:
+Issues are welcome. Run checks and tests before submitting:
 
 ```sh
 bun run devcheck
