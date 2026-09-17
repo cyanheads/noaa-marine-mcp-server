@@ -10,12 +10,7 @@ import { validateCoopsDateRange } from '@/services/coops/date-range.js';
 
 export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
   title: 'Get Water Level',
-  description:
-    'Observed water level (real-time or historical) for a CO-OPS water-level station, with paired predictions for comparison. ' +
-    'The difference (residual = observed − predicted) indicates storm surge (positive) or anomalous drawdown (negative). ' +
-    'Returns 6-minute observations alongside 6-minute predictions. ' +
-    'Date range is limited to 31 days per request; split longer ranges into multiple calls. ' +
-    'Use noaa_marine_find_stations first to resolve a station name or location to a valid station ID.',
+  description: `Observed water level, real-time or historical, for a CO-OPS water-level station, paired with 6-minute tide predictions for the same period so the residual (observed − predicted) shows storm surge when positive and anomalous drawdown when negative. Observations and predictions are fetched independently, so when the prediction series is empty, predictions_status says whether CO-OPS has none for this station and range or the prediction fetch failed — the observed series returns either way, and residual_summary is present only when both series are. Date range is limited to 31 days per request, so split longer ranges into multiple calls, and use noaa_marine_find_stations first to resolve a station name or location to a valid station ID.`,
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
@@ -90,7 +85,7 @@ export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
           .describe('A single 6-minute tide prediction.'),
       )
       .describe(
-        'Paired 6-minute tide predictions for the same period. May be empty if CO-OPS predictions are unavailable for this station.',
+        'Paired 6-minute tide predictions for the same period. Empty when CO-OPS returned no predictions for this station and range, or when the prediction fetch failed — predictions_status says which.',
       ),
     residual_summary: z
       .object({
@@ -110,6 +105,19 @@ export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
         'Summary of observed-minus-predicted residuals in the requested units. Only present when both observations and predictions are available.',
       ),
   }),
+
+  enrichment: {
+    notice: z
+      .string()
+      .optional()
+      .describe('Why the paired prediction series is missing, when it is missing.'),
+    predictions_status: z
+      .enum(['empty', 'unavailable'])
+      .optional()
+      .describe(
+        'Present only when predictions is empty. "empty" means CO-OPS returned no prediction rows for this station and date range; "unavailable" means the prediction fetch failed, so no comparison series could be retrieved and the absence says nothing about the station. Absent when predictions were returned.',
+      ),
+  },
 
   errors: [
     {
@@ -234,6 +242,20 @@ export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
       time: p.t,
       value: Number.parseFloat(p.v),
     }));
+
+    // An empty prediction array is two different facts — CO-OPS has none for this station and
+    // range, or the fetch rejected and the comparison series was never read. Say which, rather
+    // than letting a degraded upstream render as a statement about the data.
+    if (predictions.length === 0) {
+      if (predResult.status === 'rejected') {
+        ctx.enrich({ predictions_status: 'unavailable' });
+        ctx.enrich.notice(
+          `The tide-prediction fetch for station ${input.station_id} failed, so no prediction series is available to compare against and no residual could be computed. The observed series is complete. Retry to obtain the comparison series.`,
+        );
+      } else {
+        ctx.enrich({ predictions_status: 'empty' });
+      }
+    }
 
     // Compute residual summary when both series are present
     let residualSummary: { max_surge: number; max_drawdown: number } | undefined;

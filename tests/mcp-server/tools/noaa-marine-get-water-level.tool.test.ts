@@ -4,7 +4,7 @@
  */
 
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { noaaMarineGetWaterLevel } from '@/mcp-server/tools/definitions/noaa-marine-get-water-level.tool.js';
 import { initCoopsService } from '@/services/coops/coops-service.js';
@@ -154,25 +154,73 @@ describe('noaaMarineGetWaterLevel', () => {
     });
   });
 
-  it('degrades gracefully when prediction fetch fails — still returns observations', async () => {
-    const ctx = createMockContext({ errors: noaaMarineGetWaterLevel.errors });
+  // --- #21: a failed prediction fetch is not the same fact as "CO-OPS has no predictions" ---
 
+  it('returns the observed series when the prediction fetch fails, and says the series is unavailable', async () => {
     const { getCoopsService } = await import('@/services/coops/coops-service.js');
     const svc = getCoopsService();
     vi.spyOn(svc, 'fetchWaterLevel').mockResolvedValue({ data: OBS_ROWS, stationName: 'Seattle' });
     vi.spyOn(svc, 'fetchWaterLevelPredictions').mockRejectedValue(new Error('pred fetch failed'));
 
-    const input = noaaMarineGetWaterLevel.input.parse({
+    const result = await runToolContract(noaaMarineGetWaterLevel, {
       station_id: '9447130',
       begin_date: '20250115',
       end_date: '20250115',
     });
-    const result = await noaaMarineGetWaterLevel.handler(input, ctx);
+    const structured = result.structuredContent as Record<string, unknown>;
 
-    expect(result.observations).toHaveLength(2);
-    expect(result.predictions).toHaveLength(0);
-    // No residual without predictions
-    expect(result.residual_summary).toBeUndefined();
+    // The observed series still returns, and no residual is computed without predictions.
+    expect(structured.observations).toHaveLength(2);
+    expect(structured.predictions).toHaveLength(0);
+    expect(structured.residual_summary).toBeUndefined();
+    // The reason the comparison series is missing reaches both surfaces, not just the log.
+    expect(structured.predictions_status).toBe('unavailable');
+    expect(structured.notice).toContain('prediction');
+
+    const text = result.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
+    expect(text).toContain('unavailable');
+  });
+
+  it('distinguishes a failed prediction fetch from a genuinely empty prediction series', async () => {
+    const { getCoopsService } = await import('@/services/coops/coops-service.js');
+    const svc = getCoopsService();
+    vi.spyOn(svc, 'fetchWaterLevel').mockResolvedValue({ data: OBS_ROWS, stationName: 'Seattle' });
+    vi.spyOn(svc, 'fetchWaterLevelPredictions').mockResolvedValue([]);
+
+    const empty = await runToolContract(noaaMarineGetWaterLevel, {
+      station_id: '9447130',
+      begin_date: '20250115',
+      end_date: '20250115',
+    });
+    const emptyStructured = empty.structuredContent as Record<string, unknown>;
+
+    // Same predictions: [] and same absent residual_summary as the failed fetch — the two are
+    // told apart by predictions_status alone.
+    expect(emptyStructured.predictions).toHaveLength(0);
+    expect(emptyStructured.residual_summary).toBeUndefined();
+    expect(emptyStructured.predictions_status).toBe('empty');
+    expect(emptyStructured.predictions_status).not.toBe('unavailable');
+
+    const emptyText = empty.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
+    expect(emptyText).toContain('empty');
+  });
+
+  it('marks no prediction status when the prediction series came back populated', async () => {
+    const { getCoopsService } = await import('@/services/coops/coops-service.js');
+    const svc = getCoopsService();
+    vi.spyOn(svc, 'fetchWaterLevel').mockResolvedValue({ data: OBS_ROWS, stationName: 'Seattle' });
+    vi.spyOn(svc, 'fetchWaterLevelPredictions').mockResolvedValue(PRED_ROWS);
+
+    const result = await runToolContract(noaaMarineGetWaterLevel, {
+      station_id: '9447130',
+      begin_date: '20250115',
+      end_date: '20250115',
+    });
+    const structured = result.structuredContent as Record<string, unknown>;
+
+    expect(structured.predictions).toHaveLength(2);
+    expect(structured).not.toHaveProperty('predictions_status');
+    expect(structured).not.toHaveProperty('notice');
   });
 
   it('format renders station name, datum, and observation values', () => {

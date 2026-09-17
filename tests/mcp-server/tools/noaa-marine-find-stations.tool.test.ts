@@ -4,7 +4,11 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import {
+  createFetchMock,
+  createMockContext,
+  runToolContract,
+} from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { noaaMarineFindStations } from '@/mcp-server/tools/definitions/noaa-marine-find-stations.tool.js';
 import { initCoopsService } from '@/services/coops/coops-service.js';
@@ -28,6 +32,7 @@ const NDBC_BUOY = {
   lon: -124.73,
   hasMet: true,
   hasCurrents: false,
+  hasWaterQuality: false,
 };
 
 /**
@@ -42,6 +47,7 @@ const NDBC_NON_MET_BUOY = {
   type: 'buoy',
   hasMet: false,
   hasCurrents: false,
+  hasWaterQuality: false,
 };
 
 /**
@@ -57,6 +63,60 @@ const NDBC_CURRENTS_ONLY = {
   type: 'buoy',
   hasMet: false,
   hasCurrents: true,
+  hasWaterQuality: false,
+};
+
+/**
+ * 9447130 under its full CO-OPS name — the ID NDBC mirrors, and a name that only a
+ * name-substring query reaches.
+ */
+const COOPS_SEATTLE_NAMED = {
+  id: '9447130',
+  name: 'SEATTLE (Madison St.), Elliott Bay',
+  lat: 47.6,
+  lng: -122.3,
+  state: 'WA',
+  type: 'R',
+};
+
+/** A CO-OPS current station — alphanumeric ID, no NDBC mirror, so an ID query has only this row to find. */
+const COOPS_CURRENT_STATION = {
+  id: 'ACT4176',
+  name: 'Bowlers Wharf, Rappahannock River',
+  lat: 37.8,
+  lng: -76.7,
+  state: 'VA',
+  type: 'H',
+};
+
+/**
+ * EBSW1 shape — NDBC's mirror of CO-OPS 9447130. Its name opens with the CO-OPS digits, so a
+ * plain name sort ranks it ahead of the station that actually carries the queried ID.
+ */
+const NDBC_COOPS_MIRROR = {
+  id: 'EBSW1',
+  name: '9447130 - Seattle, WA',
+  lat: 47.6,
+  lon: -122.34,
+  type: 'fixed',
+  hasMet: true,
+  hasCurrents: false,
+  hasWaterQuality: false,
+};
+
+/**
+ * A waterquality="y" station reporting neither met nor currents — the shape no `types` value
+ * reached before `water_quality` joined the enum.
+ */
+const NDBC_WATER_QUALITY_ONLY = {
+  id: 'WQON1',
+  name: 'Water-quality only station',
+  lat: 38.0,
+  lon: -76.0,
+  type: 'fixed',
+  hasMet: false,
+  hasCurrents: false,
+  hasWaterQuality: true,
 };
 
 /** 32489 shape — a real station name carrying the run of spaces a blank query used to match. */
@@ -68,6 +128,7 @@ const NDBC_SPACED_NAME = {
   type: 'dart',
   hasMet: false,
   hasCurrents: false,
+  hasWaterQuality: false,
 };
 
 /** Wires both service singletons to fixed catalogs, keyed by CO-OPS station-list type. */
@@ -183,7 +244,7 @@ describe('noaaMarineFindStations', () => {
     expect(result.stations.some((s) => s.source === 'coops')).toBe(true);
   });
 
-  it('throws ctx.fail("no_results") when nothing matches', async () => {
+  it('returns a zero-match search as a success rather than an error', async () => {
     const ctx = createMockContext({ errors: noaaMarineFindStations.errors });
 
     const { getCoopsService } = await import('@/services/coops/coops-service.js');
@@ -195,10 +256,12 @@ describe('noaaMarineFindStations', () => {
     vi.spyOn(getNdbcService(), 'getActiveStations').mockResolvedValue([]);
 
     const input = noaaMarineFindStations.input.parse({ query: 'nonexistent_xyz', source: 'all' });
-    await expect(noaaMarineFindStations.handler(input, ctx)).rejects.toMatchObject({
-      code: JsonRpcErrorCode.NotFound,
-      data: { reason: 'no_results' },
-    });
+    const result = await noaaMarineFindStations.handler(input, ctx);
+
+    // An empty search is a result, not a failure — the caller reads total_found, not an error string.
+    expect(result.stations).toEqual([]);
+    expect(result.total_found).toBe(0);
+    expect(result.truncated).toBeUndefined();
   });
 
   it('computes distance and filters by radius when lat/lon provided', async () => {
@@ -358,17 +421,18 @@ describe('noaaMarineFindStations', () => {
     const ctx = createMockContext({ errors: noaaMarineFindStations.errors });
 
     // The CO-OPS `current` filter and the other capability filters must NOT match an NDBC
-    // currents station — only `current_profile` (and its `buoy` platform) reach it.
-    for (const t of ['tide', 'current', 'water_level', 'met'] as const) {
+    // currents station — only `current_profile` (and its `buoy` platform) reach it. Each
+    // non-matching filter is a zero-match search, not an error.
+    for (const t of ['tide', 'current', 'water_level', 'met', 'water_quality'] as const) {
       await mockCatalog({}, [NDBC_CURRENTS_ONLY]);
       const filtered = noaaMarineFindStations.input.parse({
         source: 'ndbc',
         types: [t],
         limit: 5,
       });
-      await expect(noaaMarineFindStations.handler(filtered, ctx)).rejects.toMatchObject({
-        data: { reason: 'no_results' },
-      });
+      const missed = await noaaMarineFindStations.handler(filtered, ctx);
+      expect(missed.stations).toEqual([]);
+      expect(missed.total_found).toBe(0);
     }
 
     await mockCatalog({}, [NDBC_CURRENTS_ONLY]);
@@ -456,6 +520,423 @@ describe('noaaMarineFindStations', () => {
     expect(bare.platform).toBe('buoy');
   });
 
+  // --- #29: query matches CO-OPS station IDs, and an exact ID match leads ---
+
+  it('returns the CO-OPS station for an ID query ahead of the NDBC mirror row', async () => {
+    const ctx = createMockContext({ errors: noaaMarineFindStations.errors });
+    await mockCatalog({ tidepredictions: [COOPS_SEATTLE_NAMED] }, [NDBC_COOPS_MIRROR]);
+
+    const input = noaaMarineFindStations.input.parse({
+      query: '9447130',
+      source: 'all',
+      limit: 10,
+    });
+    const result = await noaaMarineFindStations.handler(input, ctx);
+
+    // The mirror's name opens with the CO-OPS digits, so localeCompare alone ranks it first.
+    expect(result.stations.map((s) => s.station_id)).toEqual(['9447130', 'EBSW1']);
+    expect(result.stations[0]!.source).toBe('coops');
+    expect(result.total_found).toBe(2);
+  });
+
+  it('resolves a CO-OPS current station by ID when no NDBC row mirrors it', async () => {
+    const ctx = createMockContext({ errors: noaaMarineFindStations.errors });
+    await mockCatalog({ currentpredictions: [COOPS_CURRENT_STATION] }, [NDBC_BUOY]);
+
+    const input = noaaMarineFindStations.input.parse({
+      query: 'ACT4176',
+      source: 'all',
+      limit: 10,
+    });
+    const result = await noaaMarineFindStations.handler(input, ctx);
+
+    expect(result.stations.map((s) => s.station_id)).toEqual(['ACT4176']);
+    expect(result.stations[0]!.capabilities).toEqual(['current']);
+  });
+
+  it('matches a CO-OPS station ID case-insensitively', async () => {
+    const ctx = createMockContext({ errors: noaaMarineFindStations.errors });
+    await mockCatalog({ currentpredictions: [COOPS_CURRENT_STATION] });
+
+    const input = noaaMarineFindStations.input.parse({ query: 'act4176', source: 'coops' });
+    const result = await noaaMarineFindStations.handler(input, ctx);
+
+    expect(result.stations.map((s) => s.station_id)).toEqual(['ACT4176']);
+  });
+
+  it('still matches CO-OPS rows by name substring', async () => {
+    const ctx = createMockContext({ errors: noaaMarineFindStations.errors });
+    await mockCatalog({ tidepredictions: [COOPS_SEATTLE_NAMED] }, [NDBC_COOPS_MIRROR]);
+
+    const input = noaaMarineFindStations.input.parse({ query: 'Madison St', source: 'all' });
+    const result = await noaaMarineFindStations.handler(input, ctx);
+
+    expect(result.stations.map((s) => s.station_id)).toEqual(['9447130']);
+  });
+
+  it('still matches NDBC rows by ID and matches names across both sources', async () => {
+    const ctx = createMockContext({ errors: noaaMarineFindStations.errors });
+    await mockCatalog({ tidepredictions: [COOPS_SEATTLE_NAMED] }, [NDBC_BUOY, NDBC_COOPS_MIRROR]);
+
+    const byNdbcId = noaaMarineFindStations.input.parse({ query: '46041', source: 'all' });
+    expect(
+      (await noaaMarineFindStations.handler(byNdbcId, ctx)).stations.map((s) => s.station_id),
+    ).toEqual(['46041']);
+
+    await mockCatalog({ tidepredictions: [COOPS_SEATTLE_NAMED] }, [NDBC_BUOY, NDBC_COOPS_MIRROR]);
+    const byName = noaaMarineFindStations.input.parse({
+      query: 'seattle',
+      source: 'all',
+      limit: 10,
+    });
+    const named = await noaaMarineFindStations.handler(byName, ctx);
+    expect(named.stations.map((s) => s.source).sort()).toEqual(['coops', 'ndbc']);
+  });
+
+  it('narrows an ID query with source, state, types, and proximity rather than bypassing them', async () => {
+    const ctx = createMockContext({ errors: noaaMarineFindStations.errors });
+
+    // source: the mirror alone, the CO-OPS row excluded by source.
+    await mockCatalog({ tidepredictions: [COOPS_SEATTLE_NAMED] }, [NDBC_COOPS_MIRROR]);
+    const bySource = noaaMarineFindStations.input.parse({ query: '9447130', source: 'ndbc' });
+    expect(
+      (await noaaMarineFindStations.handler(bySource, ctx)).stations.map((s) => s.station_id),
+    ).toEqual(['EBSW1']);
+
+    // types: the CO-OPS row carries `tide`, so a `met`-only filter drops it.
+    await mockCatalog({ tidepredictions: [COOPS_SEATTLE_NAMED] }, []);
+    const byTypes = noaaMarineFindStations.input.parse({
+      query: '9447130',
+      source: 'coops',
+      types: ['met'],
+    });
+    expect((await noaaMarineFindStations.handler(byTypes, ctx)).total_found).toBe(0);
+
+    // state: a mismatching state removes the row an ID query found.
+    await mockCatalog({ tidepredictions: [COOPS_SEATTLE_NAMED] }, []);
+    const byState = noaaMarineFindStations.input.parse({ query: '9447130', state: 'CA' });
+    expect((await noaaMarineFindStations.handler(byState, ctx)).total_found).toBe(0);
+
+    // proximity: the row sits ~4,000 km outside a 50 km radius around Miami.
+    await mockCatalog({ tidepredictions: [COOPS_SEATTLE_NAMED] }, []);
+    const byRadius = noaaMarineFindStations.input.parse({
+      query: '9447130',
+      latitude: 25.8,
+      longitude: -80.2,
+      radius_km: 50,
+      source: 'coops',
+    });
+    expect((await noaaMarineFindStations.handler(byRadius, ctx)).total_found).toBe(0);
+  });
+
+  // --- #28: the NDBC waterquality flag is a filterable water_quality capability ---
+
+  it('reaches a water-quality-only NDBC station via types:["water_quality"]', async () => {
+    const ctx = createMockContext({ errors: noaaMarineFindStations.errors });
+    await mockCatalog({}, [NDBC_WATER_QUALITY_ONLY, NDBC_BUOY]);
+
+    const input = noaaMarineFindStations.input.parse({
+      source: 'ndbc',
+      types: ['water_quality'],
+      limit: 5,
+    });
+    const result = await noaaMarineFindStations.handler(input, ctx);
+
+    // met="n" and currents="n" left this station with no capability at all before #28.
+    expect(result.stations.map((s) => s.station_id)).toEqual(['WQON1']);
+    expect(result.stations[0]!.capabilities).toEqual(['water_quality']);
+    expect(result.stations[0]!.type).toBe('water_quality');
+    expect(result.stations[0]!.platform).toBe('fixed');
+  });
+
+  it('does not give a waterquality="n" station the water_quality capability', async () => {
+    const ctx = createMockContext({ errors: noaaMarineFindStations.errors });
+    await mockCatalog({}, [NDBC_BUOY]);
+
+    const unfiltered = noaaMarineFindStations.input.parse({ source: 'ndbc', limit: 5 });
+    const all = await noaaMarineFindStations.handler(unfiltered, ctx);
+    expect(all.stations[0]!.capabilities).toEqual(['met']);
+
+    await mockCatalog({}, [NDBC_BUOY]);
+    const filtered = noaaMarineFindStations.input.parse({
+      source: 'ndbc',
+      types: ['water_quality'],
+      limit: 5,
+    });
+    expect((await noaaMarineFindStations.handler(filtered, ctx)).total_found).toBe(0);
+  });
+
+  it('keeps met and water_quality as separate filters that do not reach each other', async () => {
+    const ctx = createMockContext({ errors: noaaMarineFindStations.errors });
+    await mockCatalog({}, [NDBC_WATER_QUALITY_ONLY, NDBC_BUOY]);
+
+    const metOnly = noaaMarineFindStations.input.parse({
+      source: 'ndbc',
+      types: ['met'],
+      limit: 5,
+    });
+    expect(
+      (await noaaMarineFindStations.handler(metOnly, ctx)).stations.map((s) => s.station_id),
+    ).toEqual(['46041']);
+  });
+
+  it('lists water_quality alongside met for a station carrying both flags', async () => {
+    const ctx = createMockContext({ errors: noaaMarineFindStations.errors });
+    await mockCatalog({}, [{ ...NDBC_BUOY, hasWaterQuality: true, type: 'fixed' }]);
+
+    const input = noaaMarineFindStations.input.parse({
+      source: 'ndbc',
+      types: ['water_quality'],
+      limit: 5,
+    });
+    const result = await noaaMarineFindStations.handler(input, ctx);
+
+    expect(result.stations[0]!.capabilities).toEqual(['met', 'water_quality']);
+    // `type` follows the requested filter, never the array order.
+    expect(result.stations[0]!.type).toBe('water_quality');
+  });
+
+  // --- #31: a zero-match search is a success carrying a notice and an applied-filter echo ---
+
+  it('carries the empty-search notice and applied-filter echo on structuredContent and content[]', async () => {
+    await mockCatalog({ tidepredictions: [COOPS_TIDE_STATION] }, [NDBC_BUOY]);
+
+    const result = await runToolContract(noaaMarineFindStations, {
+      state: 'WA',
+      source: 'ndbc',
+    });
+
+    expect(result.isError).toBeFalsy();
+    const structured = result.structuredContent as Record<string, unknown>;
+    expect(structured.total_found).toBe(0);
+    expect(structured.stations).toEqual([]);
+    // The notice names `state` as what excluded NDBC and gives an actionable recovery.
+    expect(structured.notice).toContain('state');
+    expect(structured.notice).toContain('source="ndbc"');
+    expect(structured.notice).not.toContain('Widen the search by increasing radius_km');
+    expect(structured.applied_search).toMatchObject({
+      catalogs_read: [],
+      source: 'ndbc',
+      state: 'WA',
+    });
+
+    const text = result.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
+    expect(text).toContain('**0 station(s) found** (showing 0)');
+    expect(text).toContain('state');
+    expect(text).toContain('**Applied search:**');
+  });
+
+  it('reads no catalog at all when state and source:"ndbc" cancel out', async () => {
+    const ctx = createMockContext({ errors: noaaMarineFindStations.errors });
+
+    const { getCoopsService } = await import('@/services/coops/coops-service.js');
+    const { getNdbcService } = await import('@/services/ndbc/ndbc-service.js');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    initCoopsService(null as any, null as any, { applicationId: 'test' });
+    initNdbcService();
+    const coopsSpy = vi.spyOn(getCoopsService(), 'getStations').mockResolvedValue([]);
+    const ndbcSpy = vi.spyOn(getNdbcService(), 'getActiveStations').mockResolvedValue([]);
+
+    const input = noaaMarineFindStations.input.parse({ state: 'WA', source: 'ndbc' });
+    const result = await noaaMarineFindStations.handler(input, ctx);
+
+    expect(result.total_found).toBe(0);
+    expect(coopsSpy).not.toHaveBeenCalled();
+    expect(ndbcSpy).not.toHaveBeenCalled();
+  });
+
+  it('does not blame state or types for a zero-match search caused only by the query', async () => {
+    await mockCatalog({ tidepredictions: [COOPS_TIDE_STATION] }, [NDBC_BUOY]);
+
+    const result = await runToolContract(noaaMarineFindStations, { query: 'nonexistent_xyz' });
+    const structured = result.structuredContent as Record<string, unknown>;
+
+    expect(structured.notice).toContain('nonexistent_xyz');
+    expect(structured.notice).not.toContain('state');
+    expect(structured.notice).not.toContain('types');
+    expect(structured.applied_search).toMatchObject({
+      catalogs_read: ['coops', 'ndbc'],
+      query: 'nonexistent_xyz',
+      source: 'all',
+    });
+    expect(structured.applied_search).not.toHaveProperty('state');
+    expect(structured.applied_search).not.toHaveProperty('types');
+    expect(structured.applied_search).not.toHaveProperty('radius_km');
+  });
+
+  it('echoes a blank query as omitted rather than as a whitespace search term', async () => {
+    await mockCatalog({}, []);
+
+    const result = await runToolContract(noaaMarineFindStations, { query: '   ', source: 'ndbc' });
+    const structured = result.structuredContent as Record<string, unknown>;
+
+    expect(structured.total_found).toBe(0);
+    expect(structured.applied_search).not.toHaveProperty('query');
+  });
+
+  it('echoes radius_km only when a center was given', async () => {
+    await mockCatalog({ tidepredictions: [COOPS_TIDE_STATION] }, []);
+
+    const withCenter = await runToolContract(noaaMarineFindStations, {
+      latitude: 25,
+      longitude: -80,
+      source: 'coops',
+    });
+    expect(withCenter.structuredContent).toMatchObject({
+      applied_search: { center: { latitude: 25, longitude: -80 }, radius_km: 100 },
+    });
+    expect((withCenter.structuredContent as Record<string, unknown>).notice).toContain(
+      'radius_km 100',
+    );
+  });
+
+  it('reports the resolved types and their per-source split on a zero-match search', async () => {
+    await mockCatalog({ tidepredictions: [COOPS_TIDE_STATION] }, []);
+
+    const result = await runToolContract(noaaMarineFindStations, {
+      source: 'coops',
+      types: ['met'],
+    });
+    const structured = result.structuredContent as Record<string, unknown>;
+
+    expect(structured.applied_search).toMatchObject({
+      types: ['met'],
+      types_by_source: { coops: [], ndbc: ['met'] },
+    });
+    expect(structured.notice).toContain('NDBC-only');
+  });
+
+  it('leaves a matching search free of any empty-result enrichment', async () => {
+    await mockCatalog({ tidepredictions: [COOPS_TIDE_STATION] }, [NDBC_BUOY]);
+
+    const result = await runToolContract(noaaMarineFindStations, {
+      query: 'seattle',
+      source: 'coops',
+    });
+    const structured = result.structuredContent as Record<string, unknown>;
+
+    expect(structured.total_found).toBe(1);
+    expect(structured).not.toHaveProperty('notice');
+    expect(structured).not.toHaveProperty('applied_search');
+    expect(structured).not.toHaveProperty('sources');
+    const text = result.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
+    expect(text).toContain('**1 station(s) found** (showing 1)');
+    expect(text).not.toContain('Applied search');
+  });
+
+  it('discloses a capped list, and composes that notice with an unread-source notice', async () => {
+    const { getCoopsService } = await import('@/services/coops/coops-service.js');
+    const { getNdbcService } = await import('@/services/ndbc/ndbc-service.js');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    initCoopsService(null as any, null as any, { applicationId: 'test' });
+    initNdbcService();
+    vi.spyOn(getCoopsService(), 'getStations').mockRejectedValue(new Error('CO-OPS down'));
+    vi.spyOn(getNdbcService(), 'getActiveStations').mockResolvedValue([
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      NDBC_BUOY as any,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      NDBC_CURRENTS_ONLY as any,
+    ]);
+
+    const result = await runToolContract(noaaMarineFindStations, { source: 'all', limit: 1 });
+    const structured = result.structuredContent as Record<string, unknown>;
+
+    expect(structured.truncated).toBe(true);
+    expect(structured.total_found).toBe(2);
+    // Both notices survive in one composed string — ctx.enrich.truncated() writes `notice`
+    // last-wins, so an uncomposed second source would silently erase the first.
+    expect(structured.notice).toContain('Showing 1 of 2 matches');
+    expect(structured.notice).toContain('coops');
+    expect(structured.sources).toMatchObject({ answered: ['ndbc'], failed: ['coops'] });
+  });
+
+  // --- #21: a rejected fan-out leg is visible, and never reads as an empty search ---
+
+  it('records the failed source on both surfaces when one catalog rejects', async () => {
+    const { getCoopsService } = await import('@/services/coops/coops-service.js');
+    const { getNdbcService } = await import('@/services/ndbc/ndbc-service.js');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    initCoopsService(null as any, null as any, { applicationId: 'test' });
+    initNdbcService();
+    vi.spyOn(getCoopsService(), 'getStations').mockImplementation(async (type) =>
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      type === 'tidepredictions' ? ([COOPS_TIDE_STATION] as any) : [],
+    );
+    vi.spyOn(getNdbcService(), 'getActiveStations').mockRejectedValue(new Error('NDBC down'));
+
+    const result = await runToolContract(noaaMarineFindStations, {
+      query: 'seattle',
+      source: 'all',
+    });
+    const structured = result.structuredContent as Record<string, unknown>;
+
+    expect(result.isError).toBeFalsy();
+    expect(structured.total_found).toBe(1);
+    expect(structured.sources).toEqual({
+      answered: ['coops'],
+      attempted: ['coops', 'ndbc'],
+      failed: ['ndbc'],
+    });
+    expect(structured.notice).toContain('ndbc');
+
+    const text = result.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
+    expect(text).toContain('**Sources:**');
+    expect(text).toContain('failed ndbc');
+  });
+
+  it('reports both legs rejecting as an upstream failure, not an empty search', async () => {
+    const ctx = createMockContext({ errors: noaaMarineFindStations.errors });
+
+    const { getCoopsService } = await import('@/services/coops/coops-service.js');
+    const { getNdbcService } = await import('@/services/ndbc/ndbc-service.js');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    initCoopsService(null as any, null as any, { applicationId: 'test' });
+    initNdbcService();
+    vi.spyOn(getCoopsService(), 'getStations').mockRejectedValue(new Error('CO-OPS down'));
+    vi.spyOn(getNdbcService(), 'getActiveStations').mockRejectedValue(new Error('NDBC down'));
+
+    const input = noaaMarineFindStations.input.parse({ query: 'seattle', source: 'all' });
+    const err = await Promise.resolve(noaaMarineFindStations.handler(input, ctx)).catch(
+      (e: unknown) => e,
+    );
+
+    expect(err).toMatchObject({
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      data: { reason: 'sources_unavailable' },
+    });
+    const data = (err as { data: Record<string, unknown> }).data;
+    expect(JSON.stringify(data)).not.toContain('Widen the search by increasing radius_km');
+    expect(data.failed_sources).toEqual(['coops', 'ndbc']);
+  });
+
+  it('reports a single-source search whose only catalog rejects as an upstream failure', async () => {
+    const ctx = createMockContext({ errors: noaaMarineFindStations.errors });
+
+    const { getCoopsService } = await import('@/services/coops/coops-service.js');
+    const { getNdbcService } = await import('@/services/ndbc/ndbc-service.js');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    initCoopsService(null as any, null as any, { applicationId: 'test' });
+    initNdbcService();
+    vi.spyOn(getCoopsService(), 'getStations').mockResolvedValue([]);
+    vi.spyOn(getNdbcService(), 'getActiveStations').mockRejectedValue(new Error('NDBC down'));
+
+    const input = noaaMarineFindStations.input.parse({ source: 'ndbc', query: 'cape' });
+    await expect(noaaMarineFindStations.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      data: { reason: 'sources_unavailable' },
+    });
+  });
+
+  it('carries no failed-source record when both catalogs answer and nothing matches', async () => {
+    await mockCatalog({ tidepredictions: [COOPS_TIDE_STATION] }, [NDBC_BUOY]);
+
+    const result = await runToolContract(noaaMarineFindStations, { query: 'nonexistent_xyz' });
+    const structured = result.structuredContent as Record<string, unknown>;
+
+    expect(structured.total_found).toBe(0);
+    expect(structured).not.toHaveProperty('sources');
+  });
+
   it('format renders station_id, name, source, and capabilities', () => {
     const output = {
       total_found: 1,
@@ -500,5 +981,46 @@ describe('noaaMarineFindStations', () => {
     // No data capability → no "Type:" segment and a "none reported" capability line.
     expect(text).not.toContain('Type:');
     expect(text).toContain('none reported');
+  });
+
+  // --- #20: decoded station names must reach both output surfaces ---
+
+  it('surfaces a decoded station name from the live catalog feed', async () => {
+    // Drives the real XML parser through the service rather than a pre-decoded fixture —
+    // a mocked getActiveStations would never run the decode this pins.
+    const ctx = createMockContext({ errors: noaaMarineFindStations.errors });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    initCoopsService(null as any, null as any, { applicationId: 'test' });
+    initNdbcService();
+    const { getCoopsService } = await import('@/services/coops/coops-service.js');
+    vi.spyOn(getCoopsService(), 'getStations').mockResolvedValue([]);
+
+    const http = createFetchMock([
+      {
+        match: (request) => request.url.includes('activestations.xml'),
+        respond: new Response(
+          `<?xml version="1.0"?><ActiveStations>` +
+            `<Station id="62114" lat="58.3" lon="0" name="Tartan &quot;A&quot; AWS" ` +
+            `owner="Private Industry Oil Platform" type="oilrig" met="y" currents="n" waterquality="n"/>` +
+            `</ActiveStations>`,
+          { headers: { 'content-type': 'text/xml' } },
+        ),
+      },
+    ]);
+
+    http.install();
+    try {
+      const input = noaaMarineFindStations.input.parse({ source: 'ndbc', query: 'Tartan' });
+      const result = await noaaMarineFindStations.handler(input, ctx);
+
+      expect(result.stations[0]!.name).toBe('Tartan "A" AWS');
+      expect(result.stations[0]!.name).not.toContain('&quot;');
+
+      const text = (noaaMarineFindStations.format!(result)[0] as { text: string }).text;
+      expect(text).toContain('Tartan "A" AWS');
+      expect(text).not.toContain('&quot;');
+    } finally {
+      http.restore();
+    }
   });
 });

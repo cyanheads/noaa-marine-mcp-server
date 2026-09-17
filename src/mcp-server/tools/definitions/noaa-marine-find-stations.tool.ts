@@ -78,20 +78,141 @@ const STATE_CODES = [
   'MP',
 ] as const;
 
+/** Filter values only a CO-OPS row can carry. */
+const COOPS_FILTER_VALUES: readonly string[] = ['tide', 'current', 'water_level'];
+
+/** Filter values only an NDBC row can carry — three data capabilities plus the buoy platform token. */
+const NDBC_FILTER_VALUES: readonly string[] = ['met', 'current_profile', 'water_quality', 'buoy'];
+
+/**
+ * The narrowing dimensions the handler applied, echoed on a zero-match search so the
+ * caller can tell an unsatisfiable filter combination from a genuine miss.
+ */
+const AppliedSearchSchema = z.object({
+  catalogs_read: z
+    .array(z.string().describe('Catalog name: coops or ndbc.'))
+    .describe(
+      'Catalogs this search actually fetched. Empty when source and state cancelled each other out and no catalog was read.',
+    ),
+  center: z
+    .object({
+      latitude: z.number().describe('Center latitude the proximity filter used.'),
+      longitude: z.number().describe('Center longitude the proximity filter used.'),
+    })
+    .optional()
+    .describe('Proximity-search center, present only when latitude and longitude were supplied.'),
+  query: z
+    .string()
+    .optional()
+    .describe(
+      'The name/ID substring as the server used it — trimmed and lowercased. Omitted when no query was supplied or it was blank.',
+    ),
+  radius_km: z
+    .number()
+    .optional()
+    .describe(
+      'Radius bound in km, present only when a center was given. Applies whenever a center is present and defaults to 100 km.',
+    ),
+  source: z.string().describe('The source filter applied: coops, ndbc, or all.'),
+  state: z
+    .string()
+    .optional()
+    .describe('The state filter applied. Restricts results to CO-OPS and excludes NDBC.'),
+  types: z
+    .array(z.string().describe('A requested capability or platform filter value.'))
+    .optional()
+    .describe('The resolved types filter. Omitted when no types filter narrowed the search.'),
+  types_by_source: z
+    .object({
+      coops: z
+        .array(z.string().describe('CO-OPS-only filter value.'))
+        .describe('Requested values only a CO-OPS row can carry.'),
+      ndbc: z
+        .array(z.string().describe('NDBC-only filter value.'))
+        .describe('Requested values only an NDBC row can carry.'),
+    })
+    .optional()
+    .describe(
+      'The requested types split by the source that can carry them — every value belongs to exactly one source, so a single-source types filter reduces the search to that source.',
+    ),
+});
+type AppliedSearch = z.infer<typeof AppliedSearchSchema>;
+
+/** Which station catalogs this search tried to read, and how each one answered. */
+const SourceReportSchema = z.object({
+  answered: z
+    .array(z.string().describe('Catalog name: coops or ndbc.'))
+    .describe('Catalogs that returned a station list — the results cover these only.'),
+  attempted: z
+    .array(z.string().describe('Catalog name: coops or ndbc.'))
+    .describe('Catalogs this search needed, after source and state decided which to read.'),
+  failed: z
+    .array(z.string().describe('Catalog name: coops or ndbc.'))
+    .describe('Catalogs whose fetch rejected. A station served only by one of these is missing.'),
+});
+type SourceReport = z.infer<typeof SourceReportSchema>;
+
+/**
+ * Explains a zero-match search from the dimensions that were actually applied. Every clause
+ * names a filter the handler used, so an unsatisfiable combination reads differently from a
+ * genuine miss and the recovery points at the filter worth changing.
+ */
+function describeEmptySearch(applied: AppliedSearch): string {
+  if (applied.catalogs_read.length === 0) {
+    return [
+      'No catalog was searched: state is a CO-OPS-only filter that excludes NDBC buoys, and',
+      `source="${applied.source}" excludes CO-OPS, so the two leave nothing to read.`,
+      `Drop state to reach NDBC buoys by query or coordinates, or keep state="${applied.state}" and set source="coops".`,
+    ].join(' ');
+  }
+
+  const applied_clauses: string[] = [];
+  const widen: string[] = [];
+
+  if (applied.state) {
+    applied_clauses.push(
+      `state="${applied.state}" restricted the search to CO-OPS and excluded NDBC buoys, which carry no state`,
+    );
+    widen.push('drop state and search by query or coordinates to reach NDBC buoys');
+  }
+
+  if (applied.types && applied.types_by_source) {
+    const list = applied.types.map((t) => `"${t}"`).join(', ');
+    const { coops, ndbc } = applied.types_by_source;
+    if (ndbc.length === 0) {
+      applied_clauses.push(`types ${list} are CO-OPS-only values, so no NDBC row can carry them`);
+    } else if (coops.length === 0) {
+      applied_clauses.push(`types ${list} are NDBC-only values, so no CO-OPS row can carry them`);
+    } else {
+      applied_clauses.push(`types ${list} kept only stations carrying one of those values`);
+    }
+    widen.push('drop types or request another capability');
+  }
+
+  if (applied.query) {
+    applied_clauses.push(
+      `query "${applied.query}" matched no station name or ID in ${applied.catalogs_read.join(' or ')}`,
+    );
+    widen.push('shorten the query or check its spelling');
+  }
+
+  if (applied.center && applied.radius_km !== undefined) {
+    applied_clauses.push(
+      `radius_km ${applied.radius_km} bounded the search around ${applied.center.latitude}, ${applied.center.longitude} — this bound applies whenever a center is given and defaults to 100 km`,
+    );
+    widen.push('increase radius_km (max 1000)');
+  }
+
+  const head =
+    applied_clauses.length > 0
+      ? `No station matched. Applied: ${applied_clauses.join('; ')}.`
+      : `No station matched, and no narrowing filter was applied — ${applied.catalogs_read.join(' and ')} returned no stations at all.`;
+  return widen.length > 0 ? `${head} To widen: ${widen.join(', or ')}.` : head;
+}
+
 export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
   title: 'Find Marine Stations',
-  description:
-    'Find CO-OPS tide/water-level/current stations and NDBC buoys near a location or by name/state. ' +
-    'Returns a unified station list with source, data capabilities, coordinates, and — for NDBC — the physical platform class. ' +
-    'This is the required first step to resolve place names or coordinates to station IDs before calling data tools. ' +
-    'CO-OPS station IDs are numeric (e.g. 9447130 for Seattle); current station IDs are alphanumeric (e.g. ACT4176). ' +
-    'NDBC buoy IDs are 5-character alphanumeric codes (e.g. 46041). ' +
-    'Two axes are reported separately: `capabilities`/`type` describe the data products a station serves ' +
-    '(tide, current, water_level, met, current_profile), while `platform` is the NDBC physical classification ' +
-    '(buoy, fixed, oilrig, dart, tao, usv, other). CO-OPS stations carry no platform class. ' +
-    'Provide latitude and longitude together for proximity search, or query/state for name-based search — both may be combined. ' +
-    'Note: CO-OPS current stations are cataloged by monitoring capability, not prediction availability. ' +
-    'If noaa_marine_get_currents returns no_predictions for a station, try the next nearest current station.',
+  description: `Find CO-OPS tide, water-level and current stations and NDBC buoys near a location, by name, or by station ID, returning a unified list with source, data capabilities, coordinates, and — for NDBC — the physical platform class. This is the required first step for resolving a place name, a coordinate pair, or a bare station number to the station IDs the data tools take: CO-OPS tide and water-level IDs are numeric (e.g. 9447130 for Seattle), CO-OPS current IDs are alphanumeric (e.g. ACT4176), and NDBC buoy IDs are 5-character alphanumeric codes (e.g. 46041). Two axes are reported separately — capabilities and type name the data products a station serves (tide, current, water_level, met, current_profile, water_quality), while platform is the NDBC physical classification (buoy, fixed, oilrig, dart, tao, usv, other) that CO-OPS stations do not carry. Supply latitude and longitude together for a proximity search, or query for a name-or-ID substring matched against both sources, or state for CO-OPS coverage in one state; the filters combine, and results lead with an exact ID match unless a proximity search is ordering them by distance. A search that matches nothing is a success with total_found: 0 carrying an echo of the filters that were applied, and a search whose catalogs did not all answer says which source is missing. Note that CO-OPS current stations are cataloged by monitoring capability rather than prediction availability, so when noaa_marine_get_currents returns no_predictions for one, try the next nearest current station.`,
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   input: z.object({
@@ -125,8 +246,10 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
       .string()
       .optional()
       .describe(
-        'Station name substring to match, case-insensitive. E.g. "seattle", "puget sound". ' +
-          'NDBC rows also match on station ID. Blank or whitespace-only values are treated as omitted.',
+        'Station name or station ID substring to match, case-insensitive, on both sources. ' +
+          'E.g. "seattle", "puget sound", "9447130", "46041". A station whose ID matches exactly is ' +
+          'returned ahead of name matches, unless latitude/longitude were supplied — a proximity ' +
+          'search orders by distance instead. Blank or whitespace-only values are treated as omitted.',
       ),
     state: z
       .enum(STATE_CODES)
@@ -145,16 +268,25 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
     types: z
       .array(
         z
-          .enum(['tide', 'current', 'water_level', 'met', 'current_profile', 'buoy'])
+          .enum([
+            'tide',
+            'current',
+            'water_level',
+            'met',
+            'current_profile',
+            'water_quality',
+            'buoy',
+          ])
           .describe(
-            "Filter value. Five are data capabilities, matched against a station's capabilities list: " +
+            "Filter value. Six are data capabilities, matched against a station's capabilities list: " +
               'tide (CO-OPS tide predictions → noaa_marine_get_tide_predictions), ' +
               'current (CO-OPS tidal-current predictions → noaa_marine_get_currents), ' +
               'water_level (CO-OPS observed water levels → noaa_marine_get_water_level), ' +
               'met (NDBC meteorological → noaa_marine_get_conditions), ' +
               'current_profile (NDBC observed ocean-current depth profile → noaa_marine_get_current_profile; ' +
-              'note this is a different data product and source than CO-OPS `current`). ' +
-              'The sixth, buoy, is a physical-platform filter (NDBC platform class equals buoy), not a data ' +
+              'note this is a different data product and source than CO-OPS `current`), ' +
+              'water_quality (NDBC sub-surface water-column sensors → noaa_marine_get_ocean_observations). ' +
+              'The seventh, buoy, is a physical-platform filter (NDBC platform class equals buoy), not a data ' +
               'capability — use it to select buoy-class platforms regardless of what data they serve.',
           ),
       )
@@ -217,17 +349,20 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
               .array(z.string().describe('Capability identifier, e.g. "tide", "water_level".'))
               .describe(
                 'Data products available at this station: any of tide, current, water_level (CO-OPS) or met, ' +
-                  'current_profile (NDBC). Empty when the station reports no data capability — platform still identifies it.',
+                  'current_profile, water_quality (NDBC). Empty when the station reports no data capability — ' +
+                  'platform still identifies it.',
               ),
           })
           .describe('A single station matching the search criteria.'),
       )
       .describe(
-        'Stations matching the search criteria, sorted by distance (if lat/lon provided) or name.',
+        'Stations matching the search criteria, sorted by distance (if lat/lon provided) or by exact ID match then name. Empty when nothing matched.',
       ),
     total_found: z
       .number()
-      .describe('Total stations matching the filters before the limit was applied.'),
+      .describe(
+        'Total stations matching the filters before the limit was applied. Zero when nothing matched.',
+      ),
     truncated: z
       .boolean()
       .optional()
@@ -236,20 +371,57 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
       ),
   }),
 
-  errors: [
-    {
-      reason: 'no_results',
-      code: JsonRpcErrorCode.NotFound,
-      when: 'No stations match the query, location, or filters.',
-      recovery:
-        'Widen the search by increasing radius_km, removing type filters, or using a broader query.',
+  enrichment: {
+    applied_search: AppliedSearchSchema.optional().describe(
+      'The narrowing dimensions this search applied, echoed when nothing matched so the caller can see which filter emptied the result.',
+    ),
+    notice: z
+      .string()
+      .optional()
+      .describe(
+        'Guidance about the result set: why a search matched nothing, which catalog did not answer, or that the list was capped.',
+      ),
+    sources: SourceReportSchema.optional().describe(
+      'Which station catalogs were attempted, answered, and failed. Present only when a catalog fetch rejected, so a partial result set is never read as a complete one.',
+    ),
+  },
+
+  enrichmentTrailer: {
+    applied_search: {
+      render: (v: AppliedSearch) => {
+        const parts = [
+          `source=${v.source}`,
+          `catalogs read: ${v.catalogs_read.join(', ') || 'none'}`,
+        ];
+        if (v.state) parts.push(`state=${v.state}`);
+        if (v.types) parts.push(`types=[${v.types.join(', ')}]`);
+        if (v.query) parts.push(`query="${v.query}"`);
+        if (v.center && v.radius_km !== undefined) {
+          parts.push(`within ${v.radius_km} km of ${v.center.latitude}, ${v.center.longitude}`);
+        }
+        return `**Applied search:** ${parts.join(' · ')}`;
+      },
     },
+    sources: {
+      render: (v: SourceReport) =>
+        `**Sources:** attempted ${v.attempted.join(', ')} · answered ${v.answered.join(', ') || 'none'} · failed ${v.failed.join(', ') || 'none'}`,
+    },
+  },
+
+  errors: [
     {
       reason: 'incomplete_coordinates',
       code: JsonRpcErrorCode.InvalidParams,
       when: 'Only one of latitude/longitude was supplied — proximity search needs the pair.',
       recovery:
         'Supply both latitude and longitude to search by proximity, or drop both and search by query or state instead.',
+    },
+    {
+      reason: 'sources_unavailable',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'Every station catalog this search needed failed to load, so no station list could be searched.',
+      recovery:
+        'Retry the search in a few moments — a catalog is cached for six hours once a fetch succeeds.',
     },
   ],
 
@@ -286,7 +458,7 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
 
     // Blank/whitespace-only queries carry no search intent — treat them as omitted
     // rather than substring-matching station names that contain runs of spaces.
-    const query = input.query?.trim().toLowerCase();
+    const query = input.query?.trim().toLowerCase() || undefined;
 
     // An empty types array means the same thing as no types array.
     const typeFilter = input.types?.length ? input.types : undefined;
@@ -301,6 +473,14 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
       !typeFilter || typeFilter.some((t) => tokens.includes(t));
 
     /**
+     * True when the station's name or ID carries the query substring. CO-OPS IDs are what tide
+     * tables and charts print, so an ID query must reach them the way it already reaches NDBC
+     * IDs — both sources run the same predicate so the two can't drift apart.
+     */
+    const matchesQuery = (name: string, id: string): boolean =>
+      !query || name.toLowerCase().includes(query) || id.toLowerCase().includes(query);
+
+    /**
      * The data capability a row leads with — always drawn from `capabilities`, never the
      * platform class. Under a capability filter this is the first requested capability the
      * station has, so `type` never contradicts it; a platform-only filter (`buoy`) matches
@@ -311,6 +491,8 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
       typeFilter?.find((t) => capabilities.includes(t)) ?? capabilities[0];
 
     const results: StationResult[] = [];
+    /** `source:id` of every row whose station ID equals the query exactly — these lead the list. */
+    const exactIdMatches = new Set<string>();
 
     // Fetch CO-OPS and NDBC lists in parallel.
     // `state` is a CO-OPS-only filter — NDBC buoys carry no state, so a state-scoped
@@ -328,6 +510,30 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
         : Promise.resolve(null),
       includeNdbc ? ndbcSvc.getActiveStations(ctx) : Promise.resolve(null),
     ]);
+
+    // A rejected leg is a source the caller never got to search. Record it rather than
+    // letting the surviving source's rows read as the whole catalog.
+    const attempted: string[] = [];
+    const failed: string[] = [];
+    if (includeCoops) {
+      attempted.push('coops');
+      if (coopsResults.status === 'rejected') failed.push('coops');
+    }
+    if (includeNdbc) {
+      attempted.push('ndbc');
+      if (ndbcResult.status === 'rejected') failed.push('ndbc');
+    }
+    const answered = attempted.filter((s) => !failed.includes(s));
+
+    // Every catalog the search needed is down. Zero rows here is an upstream failure, not an
+    // empty search, so it must not be reported as one.
+    if (attempted.length > 0 && answered.length === 0) {
+      throw ctx.fail(
+        'sources_unavailable',
+        `The ${failed.join(' and ')} station ${failed.length > 1 ? 'catalogs' : 'catalog'} could not be read, so no station list was searched.`,
+        { ...ctx.recoveryFor('sources_unavailable'), failed_sources: failed },
+      );
+    }
 
     // Process CO-OPS stations
     if (coopsResults.status === 'fulfilled' && coopsResults.value) {
@@ -350,7 +556,7 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
       for (const s of allCoops.values()) {
         if (!matchesTypeFilter(s.capabilities)) continue;
         if (input.state && s.state !== input.state) continue;
-        if (query && !s.name.toLowerCase().includes(query)) continue;
+        if (!matchesQuery(s.name, s.id)) continue;
 
         const entry: StationResult = {
           station_id: s.id,
@@ -370,6 +576,7 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
           entry.distance_km = Math.round(dist * 10) / 10;
         }
 
+        if (query && s.id.toLowerCase() === query) exactIdMatches.add(`coops:${s.id}`);
         results.push(entry);
       }
     }
@@ -380,11 +587,13 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
         // Data capabilities come only from the NDBC catalog flags — never the platform class.
         // `current_profile` is NDBC observed ocean currents (the .adcp profile
         // noaa_marine_get_current_profile reads), named apart from CO-OPS `current` (tidal-current
-        // predictions) so both stay filterable without a one-letter collision. When both flags are
-        // off the list stays empty — a bare platform is not a fabricated "buoy" capability (#13).
+        // predictions) so both stay filterable without a one-letter collision. `water_quality` is
+        // the sub-surface water-column flag noaa_marine_get_ocean_observations reads. When every
+        // flag is off the list stays empty — a bare platform is not a fabricated "buoy" capability (#13).
         const capabilities: string[] = [];
         if (s.hasMet) capabilities.push('met');
         if (s.hasCurrents) capabilities.push('current_profile');
+        if (s.hasWaterQuality) capabilities.push('water_quality');
 
         // Platform class (buoy/fixed/oilrig/dart/tao/usv/other) is a separate axis. Fold it into
         // the tokens the filter matches so a `buoy` platform filter reaches bare platforms; only
@@ -393,8 +602,7 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
         const matchTokens = platform ? [...capabilities, platform] : capabilities;
 
         if (!matchesTypeFilter(matchTokens)) continue;
-        if (query && !s.name.toLowerCase().includes(query) && !s.id.toLowerCase().includes(query))
-          continue;
+        if (!matchesQuery(s.name, s.id)) continue;
 
         const entry: StationResult = {
           station_id: s.id,
@@ -414,41 +622,85 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
           entry.distance_km = Math.round(dist * 10) / 10;
         }
 
+        if (query && s.id.toLowerCase() === query) exactIdMatches.add(`ndbc:${s.id}`);
         results.push(entry);
       }
     }
 
-    // Sort: by distance if lat/lon provided, otherwise by name
+    // Sort: by distance if lat/lon provided, otherwise exact ID matches first, then by name.
+    // NDBC mirrors CO-OPS gauges under names that start with the CO-OPS number, so a plain
+    // name sort puts the mirror ahead of the station that actually carries the queried ID.
     if (center) {
       results.sort((a, b) => (a.distance_km ?? 9999) - (b.distance_km ?? 9999));
     } else {
-      results.sort((a, b) => a.name.localeCompare(b.name));
+      const idRank = (r: StationResult) =>
+        exactIdMatches.has(`${r.source}:${r.station_id}`) ? 0 : 1;
+      results.sort((a, b) => idRank(a) - idRank(b) || a.name.localeCompare(b.name));
     }
 
     const total_found = results.length;
+    const stations = results.slice(0, input.limit);
+    const truncated = stations.length < total_found;
 
-    if (total_found === 0) {
-      throw ctx.fail('no_results', 'No stations match the specified search criteria.', {
-        ...ctx.recoveryFor('no_results'),
-      });
+    // One notice reaches the caller, so every source of guidance composes into it —
+    // ctx.enrich.truncated() writes `notice` last-wins and would otherwise erase the rest.
+    const notices: string[] = [];
+
+    if (failed.length > 0) {
+      const report: SourceReport = { answered, attempted, failed };
+      ctx.enrich({ sources: report });
+      notices.push(
+        `The ${failed.join(' and ')} ${failed.length > 1 ? 'catalogs' : 'catalog'} could not be read, so these results cover ${answered.join(' and ')} only — a station carried only by ${failed.join(' or ')} is missing from them.`,
+      );
     }
 
-    const stations = results.slice(0, input.limit);
+    if (total_found === 0) {
+      const applied: AppliedSearch = {
+        catalogs_read: answered,
+        source: input.source,
+        ...(center ? { center: { latitude: center.lat, longitude: center.lon } } : {}),
+        ...(center ? { radius_km: input.radius_km } : {}),
+        ...(query ? { query } : {}),
+        ...(input.state ? { state: input.state } : {}),
+        ...(typeFilter
+          ? {
+              types: [...typeFilter],
+              types_by_source: {
+                coops: typeFilter.filter((t) => COOPS_FILTER_VALUES.includes(t)),
+                ndbc: typeFilter.filter((t) => NDBC_FILTER_VALUES.includes(t)),
+              },
+            }
+          : {}),
+      };
+      ctx.enrich({ applied_search: applied });
+      notices.push(describeEmptySearch(applied));
+    }
 
-    if (stations.length < total_found) {
-      ctx.enrich.truncated({ shown: stations.length, cap: input.limit, ceiling: total_found });
+    if (truncated) {
+      ctx.enrich.truncated({
+        shown: stations.length,
+        cap: input.limit,
+        ceiling: total_found,
+        guidance: [
+          `Showing ${stations.length} of ${total_found} matches — raise limit (max 200) or narrow the filters to reach the rest.`,
+          ...notices,
+        ].join(' '),
+      });
+    } else if (notices.length > 0) {
+      ctx.enrich.notice(notices.join(' '));
     }
 
     ctx.log.info('Station search complete', {
       total_found,
       returned: stations.length,
       source: input.source,
+      failed_sources: failed,
     });
 
     return {
       stations,
       total_found,
-      ...(stations.length < total_found ? { truncated: true } : {}),
+      ...(truncated ? { truncated: true } : {}),
     };
   },
 

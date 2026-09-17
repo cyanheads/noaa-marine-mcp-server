@@ -16,6 +16,8 @@ const NDBC_STATION = {
   lon: -122.447,
   hasMet: true,
   hasCurrents: false,
+  // TIBC1 is waterquality="y" in the live catalog — the flag #28 exposes as a capability.
+  hasWaterQuality: true,
   type: 'fixed',
 };
 
@@ -159,21 +161,77 @@ describe('noaaMarineGetOceanObservations', () => {
     expect(result.latitude).not.toBe(0);
   });
 
-  // --- discovery guidance must stay honest: no .ocean catalog flag exists to filter on ---
+  // --- #28: discovery guidance points at the water_quality filter the catalog flag now backs ---
 
-  it('gives honest best-effort discovery guidance without fabricating an ocean capability filter', () => {
+  it('routes discovery through the water_quality capability filter on every surface', () => {
     const recoveries = noaaMarineGetOceanObservations.errors!.map((e) => e.recovery);
     expect(recoveries).toHaveLength(2);
-    for (const recovery of recoveries) {
-      expect(recovery).toContain('noaa_marine_find_stations');
-      expect(recovery).toContain('source="ndbc"');
-    }
-    // There is no .ocean capability flag in the station catalog, so no surface may claim a
-    // types filter for it — that would route the caller at a filter that does not exist.
-    const surfaces = [noaaMarineGetOceanObservations.description, ...recoveries];
+
+    const surfaces = [
+      noaaMarineGetOceanObservations.description,
+      noaaMarineGetOceanObservations.input.shape.station_id.description,
+      ...recoveries,
+    ];
     for (const text of surfaces) {
-      expect(text).not.toContain('types=[');
+      expect(text).toContain('noaa_marine_find_stations');
+      expect(text).toContain('types=["water_quality"]');
+      // A bare source="ndbc" pointer sends the caller back to an unfiltered browse — the
+      // capability filter must always ride with it.
+      expect(text!.match(/source="ndbc"(?!\s+and\s+types)/g) ?? []).toEqual([]);
     }
+  });
+
+  it('no longer claims sub-surface sensors carry no station-catalog flag', () => {
+    const surfaces = [
+      noaaMarineGetOceanObservations.description,
+      noaaMarineGetOceanObservations.input.shape.station_id.description,
+      ...noaaMarineGetOceanObservations.errors!.map((e) => e.recovery),
+    ];
+    for (const text of surfaces) {
+      expect(text).not.toMatch(
+        /no (station-)?catalog flag|not marked by any station-catalog flag/i,
+      );
+      expect(text).not.toMatch(/not flagged in the catalog/i);
+    }
+  });
+
+  it('keeps the flag a filter rather than a precondition: an unflagged station still reads', async () => {
+    const ctx = createMockContext({ errors: noaaMarineGetOceanObservations.errors });
+
+    const { getNdbcService } = await import('@/services/ndbc/ndbc-service.js');
+    const svc = getNdbcService();
+    // waterquality="n" in the catalog, yet the station serves a populated .ocean file — the
+    // tool reads any station that does, exactly as get_current_profile does for .adcp.
+    vi.spyOn(svc, 'getActiveStations').mockResolvedValue([
+      { ...NDBC_STATION, id: 'UNFLG', hasWaterQuality: false },
+    ]);
+    vi.spyOn(svc, 'fetchOceanObservations').mockResolvedValue(OCEAN_OBS);
+
+    const input = noaaMarineGetOceanObservations.input.parse({ station_id: 'UNFLG' });
+    const result = await noaaMarineGetOceanObservations.handler(input, ctx);
+
+    expect(result.reading_count).toBe(2);
+    expect(result.station_id).toBe('UNFLG');
+  });
+
+  it('still reports observations_not_found for a flagged station that serves no .ocean file', async () => {
+    const ctx = createMockContext({ errors: noaaMarineGetOceanObservations.errors });
+
+    const { getNdbcService } = await import('@/services/ndbc/ndbc-service.js');
+    const svc = getNdbcService();
+    // hasWaterQuality: true — the flag is a strong hint, never a guarantee of a served file.
+    vi.spyOn(svc, 'getActiveStations').mockResolvedValue([NDBC_STATION]);
+
+    const { notFound } = await import('@cyanheads/mcp-ts-core/errors');
+    vi.spyOn(svc, 'fetchOceanObservations').mockRejectedValue(
+      notFound('HTTP 404', { status: 404 }),
+    );
+
+    const input = noaaMarineGetOceanObservations.input.parse({ station_id: 'TIBC1' });
+    await expect(noaaMarineGetOceanObservations.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: { reason: 'observations_not_found' },
+    });
   });
 
   it('distinguishes itself from noaa_marine_get_conditions in its description', () => {

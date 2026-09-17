@@ -9,20 +9,7 @@ import { getNdbcService } from '@/services/ndbc/ndbc-service.js';
 
 export const noaaMarineGetOceanObservations = tool('noaa_marine_get_ocean_observations', {
   title: 'Get Ocean Observations',
-  description:
-    "Live sub-surface oceanographic observations from an NDBC station's water-quality sensors: at each " +
-    'reported depth, water temperature, conductivity, salinity, dissolved oxygen (both saturation percent ' +
-    'and concentration in ppm), chlorophyll, turbidity, pH, and redox potential. This is the water-column ' +
-    'counterpart to noaa_marine_get_conditions, which returns surface meteorological and wave data (wind, ' +
-    'waves, sea-surface temperature) — use this tool for what the water is doing below the surface, that ' +
-    'one for weather and sea state at the buoy. Returns the most recent observation as one reading per ' +
-    'reported depth; most stations report a single depth, but some report several at the same time. Sensor ' +
-    'coverage is sparse — most stations populate only water temperature and salinity — and any value the ' +
-    'station did not report comes back null rather than a fabricated zero. Latitude and longitude are null ' +
-    'when the station is absent from the NDBC active-stations list. Sub-surface sensors are on only a subset ' +
-    'of NDBC stations and are not marked by any station-catalog flag, so no capability filter guarantees ' +
-    'coverage: call this on candidate NDBC station IDs from noaa_marine_find_stations with source="ndbc", ' +
-    'and expect the observations_not_found error on the many stations that serve no .ocean file.',
+  description: `Live sub-surface oceanographic observations from an NDBC station's water-quality sensors: at each reported depth, water temperature, conductivity, salinity, dissolved oxygen as both saturation percent and concentration in ppm, chlorophyll, turbidity, pH, and redox potential. This is the water-column counterpart to noaa_marine_get_conditions, which returns surface meteorological and wave data — use this tool for what the water is doing below the surface, that one for weather and sea state at the buoy. It returns the most recent observation as one reading per reported depth, and most stations report a single depth while some report several at the same time; sensor coverage is sparse, most stations populating only water temperature and salinity, and any value the station did not report comes back null rather than a fabricated zero, as do latitude and longitude for a station absent from the NDBC active-stations list. Sub-surface sensors are on only a subset of NDBC stations, so find one with noaa_marine_find_stations using source="ndbc" and types=["water_quality"], which filters on NDBC's own water-quality catalog flag — the flag and actual .ocean availability drift, so this tool reads any station that serves the file and returns observations_not_found for one that does not.`,
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   input: z.object({
@@ -31,8 +18,7 @@ export const noaaMarineGetOceanObservations = tool('noaa_marine_get_ocean_observ
       .regex(/^[A-Za-z0-9_-]{1,20}$/)
       .describe(
         'NDBC station ID (5-character alphanumeric, e.g. "44033" or "TIBC1"). ' +
-          'Obtain candidate IDs from noaa_marine_find_stations with source="ndbc" — ocean-sensor ' +
-          'coverage is not flagged in the catalog, so this is a best-effort call on any NDBC station.',
+          'Obtain from noaa_marine_find_stations with source="ndbc" and types=["water_quality"].',
       ),
   }),
 
@@ -51,7 +37,11 @@ export const noaaMarineGetOceanObservations = tool('noaa_marine_get_ocean_observ
       .describe(
         'Station longitude in decimal degrees. Null when the station is absent from the NDBC active-stations list.',
       ),
-    observed_at: z.string().describe('ISO 8601 UTC timestamp of the observation.'),
+    observed_at: z
+      .string()
+      .describe(
+        'ISO 8601 UTC timestamp of the observation. Always a valid instant — a row whose upstream time columns are malformed is rejected rather than timestamped with the current time.',
+      ),
     source: z.string().describe('Data source — always "ndbc" for this tool.'),
     reading_count: z
       .number()
@@ -123,14 +113,14 @@ export const noaaMarineGetOceanObservations = tool('noaa_marine_get_ocean_observ
       code: JsonRpcErrorCode.NotFound,
       when: 'NDBC returned 404 for the station — no .ocean oceanographic file exists for it.',
       recovery:
-        'Oceanographic sensors are on only a subset of NDBC stations with no station-catalog flag to filter on — browse other NDBC stations with noaa_marine_find_stations using source="ndbc" and try their IDs.',
+        'Find a water-quality-flagged station with noaa_marine_find_stations using source="ndbc" and types=["water_quality"], then call this tool with that station ID.',
     },
     {
       reason: 'no_ocean_data',
       code: JsonRpcErrorCode.NotFound,
       when: 'The .ocean file exists but has no usable data rows — station offline or every depth row missing.',
       recovery:
-        'This station may be temporarily offline — try another NDBC station from noaa_marine_find_stations with source="ndbc".',
+        'This station may be temporarily offline — try another one from noaa_marine_find_stations with source="ndbc" and types=["water_quality"].',
     },
   ],
 
@@ -161,7 +151,7 @@ export const noaaMarineGetOceanObservations = tool('noaa_marine_get_ocean_observ
         }
         throw ctx.fail(
           'observations_not_found',
-          `NDBC has no oceanographic (.ocean) file for station ${input.station_id} — sub-surface sensors are on only a subset of NDBC stations. Use noaa_marine_find_stations with source="ndbc" to browse other station IDs to try.`,
+          `NDBC has no oceanographic (.ocean) file for station ${input.station_id} — sub-surface sensors are on only a subset of NDBC stations. Use noaa_marine_find_stations with source="ndbc" and types=["water_quality"] to find one that carries them.`,
           { ...ctx.recoveryFor('observations_not_found') },
         );
       }
