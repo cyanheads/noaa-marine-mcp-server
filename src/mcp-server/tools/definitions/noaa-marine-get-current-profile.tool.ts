@@ -9,15 +9,7 @@ import { getNdbcService } from '@/services/ndbc/ndbc-service.js';
 
 export const noaaMarineGetCurrentProfile = tool('noaa_marine_get_current_profile', {
   title: 'Get Ocean Current Profile',
-  description:
-    'Observed ocean-current depth profile from an NDBC ADCP buoy: the most recent measurement of ' +
-    'current speed and direction at each depth bin. Returns depth in meters, direction in degrees ' +
-    'true (the direction the current flows toward), and speed in cm/s. Distinct from ' +
-    'noaa_marine_get_currents, which returns CO-OPS tidal-current predictions (forecast max flood/ebb/slack) ' +
-    'rather than these observed acoustic-Doppler measurements. A depth bin is reported whenever NDBC ' +
-    'gives it a depth; its direction or speed is null when the sensor did not report that component. ' +
-    'Use noaa_marine_find_stations with source="ndbc" and types=["current_profile"] to find station IDs — ' +
-    'most NDBC stations serve no ADCP profile, so an unfiltered search returns IDs this tool cannot read.',
+  description: `Observed ocean-current depth profile from an NDBC ADCP buoy — the most recent measurement of current speed and direction at each depth bin, returning depth in meters, direction in degrees true (the direction the current flows toward), and speed in cm/s. It is distinct from noaa_marine_get_currents, which returns CO-OPS tidal-current predictions of max flood, ebb and slack rather than these observed acoustic-Doppler measurements. A depth bin is reported whenever NDBC gives it a depth, and its direction or speed is null when the sensor did not report that component. Use noaa_marine_find_stations with source="ndbc" and types=["current_profile"] to find station IDs, since most NDBC stations serve no ADCP profile and an unfiltered search returns IDs this tool cannot read.`,
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   input: z.object({
@@ -45,7 +37,11 @@ export const noaaMarineGetCurrentProfile = tool('noaa_marine_get_current_profile
       .describe(
         'Station longitude in decimal degrees. Null when the station is absent from the NDBC active-stations list.',
       ),
-    observed_at: z.string().describe('ISO 8601 UTC timestamp of the observation.'),
+    observed_at: z
+      .string()
+      .describe(
+        'ISO 8601 UTC timestamp of the observation. Always a valid instant — a row whose upstream time columns are malformed is rejected rather than timestamped with the current time.',
+      ),
     source: z.string().describe('Data source — always "ndbc" for this tool.'),
     bin_count: z.number().describe('Number of depth bins in the profile.'),
     bins: z

@@ -10,13 +10,7 @@ import { validateCoopsDateRange } from '@/services/coops/date-range.js';
 
 export const noaaMarineGetTidePredictions = tool('noaa_marine_get_tide_predictions', {
   title: 'Get Tide Predictions',
-  description:
-    'High/low tide predictions for a CO-OPS tide station over a date range. ' +
-    'Returns time, height, and tide type (H=high, L=low) for each event when using the default hilo interval, ' +
-    'or 6-minute interval predictions for a detailed tide curve. ' +
-    'Datum defaults to MLLW (mean lower low water — standard for US nautical charts). ' +
-    'Date range is limited to 1 year per request; split longer ranges across multiple calls. ' +
-    'Use noaa_marine_find_stations first to resolve a station name or location to a numeric station ID.',
+  description: `High and low tide predictions for a CO-OPS tide station over a date range. The default hilo interval returns the time, height, and tide type (H for high, L for low) of each event, while the 6-minute interval returns the detailed tide curve. Datum defaults to MLLW, mean lower low water, the standard for US nautical charts, and the date range is limited to 1 year per request, so split longer ranges across multiple calls — use noaa_marine_find_stations first to resolve a station name or location to a numeric station ID.`,
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({

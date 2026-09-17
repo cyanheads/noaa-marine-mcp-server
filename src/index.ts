@@ -37,19 +37,7 @@ await createApp({
     'resources/list': { ttlMs: 86_400_000, cacheScope: 'public' },
     'resources/templates/list': { ttlMs: 86_400_000, cacheScope: 'public' },
   },
-  instructions:
-    'US marine conditions via NOAA CO-OPS and NDBC. ' +
-    'Start with noaa_marine_find_stations to resolve a location or name to station IDs, ' +
-    'then call the appropriate data tool. ' +
-    'CO-OPS provides tide predictions (noaa_marine_get_tide_predictions), ' +
-    'observed water levels and storm surge (noaa_marine_get_water_level), ' +
-    'and tidal-current predictions (noaa_marine_get_currents). ' +
-    'NDBC provides live buoy conditions — waves, wind, sea-surface temp (noaa_marine_get_conditions), ' +
-    'observed ocean-current depth profiles (noaa_marine_get_current_profile), ' +
-    'and sub-surface water-column observations — temperature, salinity, dissolved oxygen and more (noaa_marine_get_ocean_observations). ' +
-    'The two current tools are distinct: get_currents is CO-OPS tidal-current predictions (forecast), ' +
-    'get_current_profile is NDBC observed depth-binned currents from an ADCP buoy. ' +
-    'All water height data is referenced to MLLW by default (US nautical chart datum).',
+  instructions: `US marine conditions from NOAA CO-OPS and NDBC: CO-OPS is coastal-gauge tide and tidal-current predictions plus observed water levels, NDBC is live buoy observation, and every water height is referenced to MLLW, the US nautical chart datum, unless another datum is requested. Start with noaa_marine_find_stations to resolve a place name, a coordinate pair, or a bare station number to a station ID — its types filter names what each station can serve, and an ID from one source never works on a tool that reads the other. That source split is also what separates the two current tools: noaa_marine_get_currents returns CO-OPS tidal-current predictions, noaa_marine_get_current_profile an observed NDBC ADCP measurement.`,
 
   setup(core) {
     const serverConfig = getServerConfig();

@@ -10,15 +10,7 @@ import { validateCoopsDateRange } from '@/services/coops/date-range.js';
 
 export const noaaMarineGetCurrents = tool('noaa_marine_get_currents', {
   title: 'Get Tidal Currents',
-  description:
-    'Tidal current predictions for a CO-OPS current station: max flood/ebb speeds, slack times, and directions. ' +
-    'These are forecast tidal-current predictions from CO-OPS — distinct from noaa_marine_get_current_profile, which ' +
-    'returns NDBC observed ocean-current measurements binned by depth. ' +
-    'Defaults to MAX_SLACK interval — the practical planning view showing when currents peak and when slack water occurs. ' +
-    'Optionally returns 6-minute continuous predictions for detailed analysis. ' +
-    'Current station IDs use alphanumeric format (e.g. ACT4176), distinct from numeric tide/water-level IDs. ' +
-    'Date range is limited to 1 year per request. ' +
-    'Use noaa_marine_find_stations with types=["current"] to obtain valid current station IDs.',
+  description: `Tidal current predictions for a CO-OPS current station: max flood and ebb speeds, slack times, and directions. These are forecast predictions from CO-OPS, distinct from noaa_marine_get_current_profile, which returns NDBC observed ocean-current measurements binned by depth. The default MAX_SLACK interval is the practical planning view, showing when currents peak and when slack water occurs, and a 6-minute interval returns the continuous curve for detailed analysis. Current station IDs are alphanumeric (e.g. ACT4176), distinct from the numeric tide and water-level IDs, and the date range is limited to 1 year per request — use noaa_marine_find_stations with types=["current"] to obtain a valid current station ID.`,
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
