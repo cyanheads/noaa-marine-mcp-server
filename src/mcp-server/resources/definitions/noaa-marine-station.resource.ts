@@ -6,11 +6,12 @@
 import { resource, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getCoopsService } from '@/services/coops/coops-service.js';
+import { currentPredictionClass, tidePredictionClass } from '@/services/coops/prediction-class.js';
 import { getNdbcService } from '@/services/ndbc/ndbc-service.js';
 
 export const noaaMarineStationResource = resource('noaa-marine://station/{station_id}', {
   name: 'noaa_marine_station',
-  description: `Metadata for a CO-OPS or NDBC station by ID: name, coordinates, source, data capabilities, and — for NDBC — the physical platform class. The type field is the primary data capability, meaning the same thing here as in noaa_marine_find_stations, and is omitted when the station reports no data capability; platform is the NDBC platform class (buoy, fixed, oilrig, dart, tao, usv, other), a separate axis that CO-OPS stations do not carry. CO-OPS station IDs are numeric for tide and water-level stations and alphanumeric for current stations, while NDBC station IDs are 5-character alphanumeric codes — use noaa_marine_find_stations to discover them. A station ID that neither catalog carries is a station_not_found error, distinct from source_unavailable, which says a catalog could not be read and so was never searched.`,
+  description: `Metadata for a CO-OPS or NDBC station by ID: name, coordinates, source, data capabilities, the CO-OPS prediction class, and — for NDBC — the physical platform class. The type field is the primary data capability, meaning the same thing here as in noaa_marine_find_stations, and is omitted when the station reports no data capability; platform is the NDBC platform class (buoy, fixed, oilrig, dart, tao, usv, other), a separate axis that CO-OPS stations do not carry. prediction_class is a third axis, again identical to the field of that name on noaa_marine_find_stations: a tide station is reference (serving both hilo and the 6-minute curve) or subordinate (hilo only, with reference_id naming the station its offsets come from), while a current station carries its class per depth bin in bins[], whose bin numbers are what noaa_marine_get_currents takes as bin. CO-OPS station IDs are numeric for tide and water-level stations and alphanumeric for current stations, while NDBC station IDs are 5-character alphanumeric codes — use noaa_marine_find_stations to discover them. A station ID that neither catalog carries is a station_not_found error, distinct from source_unavailable, which says a catalog could not be read and so was never searched.`,
   mimeType: 'application/json',
   cacheHint: { ttlMs: 21_600_000, cacheScope: 'public' },
   params: z.object({
@@ -57,17 +58,20 @@ export const noaaMarineStationResource = resource('noaa-marine://station/{statio
     // Check CO-OPS
     if (coopsResult.status === 'fulfilled') {
       const [tide, current, waterLevel] = coopsResult.value;
-      const match =
-        tide.find((s) => s.id.toUpperCase() === id) ??
-        current.find((s) => s.id.toUpperCase() === id) ??
-        waterLevel.find((s) => s.id.toUpperCase() === id);
+      // Each list is read on its own, because a field's meaning depends on which catalog
+      // published it: the prediction class of a tide row is not the class of a current bin.
+      // `currentpredictions` carries one row per depth bin, so that one is a filter.
+      const tideRow = tide.find((s) => s.id.toUpperCase() === id);
+      const currentRows = current.filter((s) => s.id.toUpperCase() === id);
+      const waterLevelRow = waterLevel.find((s) => s.id.toUpperCase() === id);
+      const match = tideRow ?? currentRows[0] ?? waterLevelRow;
 
       if (match) {
         // A CO-OPS match came from one of the three lists, so at least one capability is present.
         const caps: string[] = [];
-        if (tide.some((s) => s.id.toUpperCase() === id)) caps.push('tide');
-        if (current.some((s) => s.id.toUpperCase() === id)) caps.push('current');
-        if (waterLevel.some((s) => s.id.toUpperCase() === id)) caps.push('water_level');
+        if (tideRow) caps.push('tide');
+        if (currentRows.length > 0) caps.push('current');
+        if (waterLevelRow) caps.push('water_level');
 
         const result: Record<string, unknown> = {
           station_id: match.id,
@@ -78,10 +82,25 @@ export const noaaMarineStationResource = resource('noaa-marine://station/{statio
           capabilities: caps,
         };
         // `type` is the primary data capability — the same axis find_stations reports. The CO-OPS
-        // catalog `type` code (R/T/S reference classes) is a different, undocumented axis and is not
-        // surfaced here; CO-OPS has no platform class.
+        // catalog prediction class is a third axis and reports under its own name, identically on
+        // both surfaces (#14): on the row for a tide station, and per bin for a current station,
+        // whose bins can mix classes. CO-OPS has no platform class.
         if (caps[0]) result.type = caps[0];
         if (match.state) result.state = match.state;
+        const predictionClass = tidePredictionClass(tideRow?.type);
+        if (predictionClass) result.prediction_class = predictionClass;
+        // A reference station's row carries `reference_id` as an empty string.
+        if (tideRow?.reference_id) result.reference_id = tideRow.reference_id;
+        const bins = currentRows
+          .filter((s) => s.currbin !== undefined)
+          .map((s) => {
+            const bin: Record<string, unknown> = { bin: s.currbin, depth: s.depth ?? null };
+            if (s.depthType) bin.depth_type = s.depthType;
+            const binClass = currentPredictionClass(s.type);
+            if (binClass) bin.prediction_class = binClass;
+            return bin;
+          });
+        if (bins.length > 0) result.bins = bins;
         return result;
       }
     }

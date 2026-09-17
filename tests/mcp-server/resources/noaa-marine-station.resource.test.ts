@@ -106,9 +106,10 @@ describe('noaaMarineStationResource', () => {
       latitude: 47.6,
       longitude: -122.3,
     });
-    // #14: type is the primary DATA capability, matching find_stations — not the CO-OPS R/T/S
-    // catalog code ('R'), which is a different axis and is not surfaced.
+    // #14: type is the primary DATA capability, matching find_stations. The CO-OPS catalog
+    // class is a different axis and reports under its own name on both surfaces.
     expect(result.type).toBe('tide');
+    expect(result.prediction_class).toBe('reference');
     expect(result.capabilities).toEqual(['tide']);
     // CO-OPS publishes no platform taxonomy.
     expect(result).not.toHaveProperty('platform');
@@ -352,6 +353,72 @@ describe('noaaMarineStationResource', () => {
     >;
 
     expect(result.capabilities).toEqual(['current']);
+  });
+
+  // --- #26/#27: the CO-OPS prediction class and current-prediction bins on this surface ---
+
+  it('reports the tide prediction class and reference station for a subordinate tide station', async () => {
+    const ctx = createMockContext({ tenantId: 'test', errors: noaaMarineStationResource.errors });
+
+    const { getCoopsService } = await import('@/services/coops/coops-service.js');
+    const { getNdbcService } = await import('@/services/ndbc/ndbc-service.js');
+    vi.spyOn(getCoopsService(), 'getStations').mockImplementation(async (type) =>
+      type === 'tidepredictions'
+        ? [
+            {
+              id: '9440563',
+              name: 'Hungry Harbor, Wash.',
+              lat: 46.2583,
+              lng: -123.848,
+              state: 'WA',
+              type: 'S',
+              reference_id: '9439040',
+            },
+          ]
+        : [],
+    );
+    vi.spyOn(getNdbcService(), 'getActiveStations').mockResolvedValue([]);
+
+    const params = noaaMarineStationResource.params!.parse({ station_id: '9440563' });
+    const result = (await noaaMarineStationResource.handler(params, ctx)) as Record<
+      string,
+      unknown
+    >;
+
+    expect(result.prediction_class).toBe('subordinate');
+    expect(result.reference_id).toBe('9439040');
+    expect(result).not.toHaveProperty('bins');
+  });
+
+  it('reports every current-prediction bin with its own class', async () => {
+    const ctx = createMockContext({ tenantId: 'test', errors: noaaMarineStationResource.errors });
+
+    const base = { id: 'BOS1104', name: 'Boston Harbor Approach', lat: 42.33, lng: -70.9 };
+    const { getCoopsService } = await import('@/services/coops/coops-service.js');
+    const { getNdbcService } = await import('@/services/ndbc/ndbc-service.js');
+    vi.spyOn(getCoopsService(), 'getStations').mockImplementation(async (type) =>
+      type === 'currentpredictions'
+        ? [
+            { ...base, currbin: 1, depth: 12, depthType: 'B', type: 'H' },
+            { ...base, currbin: 2, depth: null, depthType: 'U', type: 'W' },
+          ]
+        : [],
+    );
+    vi.spyOn(getNdbcService(), 'getActiveStations').mockResolvedValue([]);
+
+    const params = noaaMarineStationResource.params!.parse({ station_id: 'BOS1104' });
+    const result = (await noaaMarineStationResource.handler(params, ctx)) as Record<
+      string,
+      unknown
+    >;
+
+    expect(result.capabilities).toEqual(['current']);
+    expect(result.bins).toEqual([
+      { bin: 1, depth: 12, depth_type: 'B', prediction_class: 'harmonic' },
+      { bin: 2, depth: null, depth_type: 'U', prediction_class: 'weak_and_variable' },
+    ]);
+    // A current station's class is per bin, so the row carries none.
+    expect(result).not.toHaveProperty('prediction_class');
   });
 
   it('includes owner field for NDBC stations that have one', async () => {
