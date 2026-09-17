@@ -37,7 +37,7 @@ US tide, current, and buoy data from NOAA CO-OPS and NDBC. Find tide, water-leve
 |:-----|:------------|
 | `noaa_marine_find_stations` | Find CO-OPS tide/water-level/current stations and NDBC buoys by location, name, state, or data capability. |
 | `noaa_marine_get_tide_predictions` | High/low tide predictions or a 6-minute curve for a CO-OPS tide station. |
-| `noaa_marine_get_water_level` | Observed water level paired with predictions for a CO-OPS station, with a storm-surge residual summary. |
+| `noaa_marine_get_water_level` | Observed water level at a 6-minute, hourly, high/low, or daily-mean cadence, paired with predictions and a storm-surge residual summary. |
 | `noaa_marine_get_currents` | CO-OPS tidal current predictions — max flood/ebb/slack events or a 6-minute curve. |
 | `noaa_marine_get_conditions` | Live NDBC buoy conditions: waves, wind, sea-surface and air temperature, pressure. |
 | `noaa_marine_get_current_profile` | Observed ocean-current depth profile from an NDBC ADCP buoy. |
@@ -57,6 +57,7 @@ All resource data is also reachable via tools — use `noaa_marine_find_stations
 
 - Filter by proximity (`latitude`/`longitude` + `radius_km`, default 100 km, max 1000 km), name/ID substring (matched against both sources; an exact ID match sorts first), US state/territory (CO-OPS only), source (`coops`/`ndbc`/`all`), or `types`: data capabilities (`tide`, `current`, `water_level`, `met`, `current_profile`, `water_quality`) or NDBC platform class (`buoy`)
 - Returns up to `limit` (default 20, max 200) unified stations with source, coordinates, distance, data capabilities, and — for NDBC — physical platform class (buoy, fixed, oilrig, dart, tao, usv, other)
+- CO-OPS prediction stations also carry `prediction_class`, a third axis beside capability and platform: a tide station is `reference` (serving `hilo` and the 6-minute curve) or `subordinate` (`hilo` only, with `reference_id` naming where its offsets come from), while a current station reports its class per depth bin in `bins[]` alongside each bin's number and catalog depth in feet — the bin numbers `noaa_marine_get_currents` takes as `bin`
 - `total_found` and `truncated` report the full match count before the limit is applied
 - Zero matches is a success with `total_found: 0`, carrying a notice derived from the filters that were applied and an echo of the applied search
 - A catalog that fails to load is reported as an unread source alongside the results; when every needed catalog fails, that is a typed `sources_unavailable` error rather than an empty search
@@ -68,27 +69,41 @@ All resource data is also reachable via tools — use `noaa_marine_find_stations
 ### `noaa_marine_get_tide_predictions` <sub>tool</sub>
 
 - `hilo` (default, high/low events) or `6min` continuous curve; up to 1 year per request
-- Eight datums: MLLW (default, US nautical chart), MHHW, MSL, MTL, MHW, MLW, CD, STND
+- A range whose rows fit the response budget returns whole; a longer one returns the leading rows as a page, with `rows_matched`, `rows_returned`, `page_offset`, and `next_offset` on both consumption surfaces. Walk it with `offset`; `limit` lowers a page and never raises it past the byte bound, and an `offset` past the last row is an empty page rather than an error
+- `6min` is served by reference stations only — a subordinate station's high and low events are offsets from a reference station and it has no 6-minute curve, so the request is refused before the upstream call as a typed `subordinate_no_6min` naming `hilo` and that reference station
+- Ten datums, matching what the CO-OPS predictions product accepts: MLLW (default, US nautical chart), MHHW, MHW, MTL, MSL, MLW, DTL, NAVD (NAVD88, where the station has a tie), STND (the station's own datum), CRD (Columbia River only)
+- A datum the station does not carry is a typed `datum_unavailable` naming the planes it does, not a report that the station ID was wrong; a Great Lakes station, which publishes no prediction series at any datum, is `no_predictions` pointing at `noaa_marine_get_water_level`
 - Time zone (`lst_ldt` default, `gmt`, `lst`) and units (`english` default feet, `metric` meters)
-- Typed `date_range_exceeded`, `invalid_date_range`, `station_not_found`, and `no_predictions` errors
+- Typed `date_range_exceeded`, `invalid_date_range`, `station_not_found`, `no_predictions`, `datum_unavailable`, and `subordinate_no_6min` errors
 
 ---
 
 ### `noaa_marine_get_water_level` <sub>tool</sub>
 
-- 6-minute observed water level with quality flags (`p` preliminary, `v` verified) and optional sensor `sigma`
-- Paired 6-minute tide predictions fetched in parallel — the observed series returns either way, and `predictions_status` says whether an empty prediction series means CO-OPS has none or the fetch failed
-- `residual_summary` (max surge, max drawdown) only when both series are present
-- Up to 31 days per request; typed `date_range_exceeded`, `station_not_found`, and `no_data` errors
+- `interval` selects the cadence: `6min` (default) the full curve, `hourly` hourly heights, `high_low` the observed high and low waters with their `H`/`HH`/`L`/`LL` classification, `daily_mean` the daily mean at Great Lakes stations only. The `interval` is echoed in the output
+- Per-interval CO-OPS range ceilings, rejected locally before the call: 31 days for `6min`, 365 for `hourly` and `high_low`, 3,655 for `daily_mean`. A coarser cadence is not automatically a smaller response — a year of `hourly` rows outweighs a month of 6-minute ones — so the ceiling bounds the request and the response budget bounds the page
+- Quality flags (`p` preliminary, `v` verified) on `6min` only: CO-OPS sends no flag with the coarser products, and `quality` is omitted rather than defaulted to preliminary, which would label verified data unverified. Sensor `sigma` on `6min` and `hourly`
+- Thirteen datums, matching what the CO-OPS water-level product accepts: MLLW (default, US nautical chart), MHHW, MHW, MTL, MSL, MLW, NAVD (NAVD88, where the station has a tie), STND (the station's own datum), IGLD and LWD (Great Lakes only), CRD (Columbia River only), LWI and HWI (lunitidal intervals)
+- A datum the station does not carry is a typed `datum_unavailable` whose recovery names the planes that do read it — `STND`, `IGLD`, `LWD` at a Great Lakes station, `MLLW`/`STND` where an NAVD88 tie is missing — rather than sending the caller back to re-verify an ID `noaa_marine_find_stations` just returned
+- A sensor outage leaves slots with no reading; they are dropped and counted in `gaps_dropped`, so `rows_matched` always counts only the slots that carried a value and continuous coverage across the range is only implied when that count is absent
+- Paired tide predictions at the interval matching the observed cadence, fetched in parallel — the observed series returns either way, and `predictions_status` says whether an empty prediction series means CO-OPS has none or the fetch failed. Not fetched at all on `daily_mean`, which has no paired series
+- `residual_summary` (max surge, max drawdown) only when both series are present, computed from the finite observed/predicted pairs across the whole matched series rather than the returned page. Reported on `6min` and `hourly` only — observed high and low waters do not occur at the predicted extreme times, so a `high_low` join would rest on a small fraction of the events, and `daily_mean` has no paired series at all; the notice says which applies
+- A range whose rows fit the response budget returns whole; a longer one returns the leading rows as a page, with `rows_matched`, `rows_returned`, `page_offset`, and `next_offset` on both consumption surfaces. Observations carry the `offset` and the paired predictions follow by time window, so a page's two series always describe one span even after gap rows shorten the observed one
+- `daily_mean` is requested in local standard time whatever `time_zone` was passed — CO-OPS serves that product in LST only and silently shifts any other zone by a day
+- Typed `date_range_exceeded`, `invalid_date_range`, `station_not_found`, `no_data`, `datum_unavailable`, `great_lakes_only` (`daily_mean` at a coastal station), and `verified_data_lag` errors — the last for a window CO-OPS has not verified yet, since it verifies the coarser products monthly for the prior month
 
 ---
 
 ### `noaa_marine_get_currents` <sub>tool</sub>
 
 - `MAX_SLACK` (default): max flood, max ebb, and slack events only — the actionable view for passage planning
-- `6min`: continuous current curve; units `english` (knots, default) or `metric` (m/s)
+- `6min`: continuous current curve, each row carrying its own `flood`/`ebb`/`slack` sense plus the station mean flood or ebb bearing that sense implies (a station constant, not an instantaneous heading)
+- Both intervals are bounded by response size: a range whose rows fit the response budget returns whole; a longer one returns the leading rows as a page, with `rows_matched`, `rows_returned`, `page_offset`, and `next_offset` on both surfaces. `offset` and `limit` walk whichever series the interval selects — the max/slack events or the 6-minute curve
+- Units `english` (knots for speed, feet for the echoed depth, default) or `metric` (cm/s for speed, meters for depth) — CO-OPS publishes metric current speed in cm/s, the unit `noaa_marine_get_current_profile` also reports
+- `bin` selects one of a station's depth bins; omit it for the CO-OPS default, the shallowest. The bin CO-OPS answered with and its depth are echoed on every response, and a bin the station does not publish is a typed `bin_unavailable` naming the bins it does
+- A station whose currents CO-OPS will not predict as discrete events returns an empty list plus CO-OPS's own wording in the notice, not an error
 - Current station IDs are alphanumeric (e.g. `ACT4176`), distinct from numeric tide/water-level IDs
-- Up to 1 year per request; typed `date_range_exceeded`, `invalid_date_range`, `station_not_found`, and `no_predictions` errors
+- Up to 1 year per request; typed `date_range_exceeded`, `invalid_date_range`, `station_not_found`, `no_predictions`, `predictions_unavailable`, and `bin_unavailable` errors
 
 ---
 
@@ -122,7 +137,7 @@ All resource data is also reachable via tools — use `noaa_marine_find_stations
 
 ### `noaa-marine://station/{station_id}` <sub>resource</sub>
 
-- Station record as `application/json` — name, coordinates, source, capabilities, state, and (NDBC) platform class
+- Station record as `application/json` — name, coordinates, source, capabilities, state, the CO-OPS `prediction_class` (with `reference_id` or per-bin `bins[]`, exactly as on `noaa_marine_find_stations`), and (NDBC) platform class
 - `station_id` comes from `noaa_marine_find_stations`
 - Typed `station_not_found` when both catalogs were read and neither carries the ID, and `source_unavailable` when a catalog could not be read — a station only the unread catalog carries is never reported as nonexistent
 - Cached with a 6-hour TTL (`cacheHint`)

@@ -227,7 +227,10 @@ src/
     server-config.ts                    # NOAA_APPLICATION_ID env var (optional, defaults to server name)
   services/
     coops/
-      coops-service.ts                  # CO-OPS Tides & Currents API (station cache, data fetch)
+      coops-service.ts                  # CO-OPS Tides & Currents API (station cache, data fetch, message classifier)
+      date-range.ts                     # YYYYMMDD calendar validation and span, shared by the date-ranged tools
+      prediction-class.ts               # Decodes the catalog `type` letter into a prediction class
+      row-page.ts                       # Byte-bounded row paging shared by the time-series tools
       types.ts                          # CO-OPS domain types
     ndbc/
       ndbc-service.ts                   # NDBC buoy service (active stations XML, realtime text)
