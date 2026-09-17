@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.5.0](changelog/0.5.x/0.5.0.md) — 2026-09-17 · ⚠️ Breaking
+
+Paged CO-OPS series, coarser water levels, datum and class fixes
+
 ## [0.4.0](changelog/0.4.x/0.4.0.md) — 2026-09-17 · ⚠️ Breaking
 
 NDBC parser fixes, structured empty searches, water_quality station type

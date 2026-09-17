@@ -1,6 +1,6 @@
 # noaa-marine-mcp-server - Directory Structure
 
-Generated on: 2026-09-17 17:01:50
+Generated on: 2026-09-17 19:57:58
 
 ```text
 noaa-marine-mcp-server/
@@ -28,6 +28,7 @@ noaa-marine-mcp-server/
 │   ├── 0.2.x/
 │   ├── 0.3.x/
 │   ├── 0.4.x/
+│   ├── 0.5.x/
 │   └── template.md
 ├── docs/
 │   ├── design.md
@@ -158,6 +159,8 @@ noaa-marine-mcp-server/
 │   │   ├── coops/
 │   │   │   ├── coops-service.ts
 │   │   │   ├── date-range.ts
+│   │   │   ├── prediction-class.ts
+│   │   │   ├── row-page.ts
 │   │   │   └── types.ts
 │   │   └── ndbc/
 │   │       ├── ndbc-service.ts
@@ -179,7 +182,9 @@ noaa-marine-mcp-server/
 │   ├── resources/
 │   ├── services/
 │   │   ├── coops/
-│   │   │   └── date-range.test.ts
+│   │   │   ├── coops-service.test.ts
+│   │   │   ├── date-range.test.ts
+│   │   │   └── row-page.test.ts
 │   │   └── ndbc/
 │   │       └── ndbc-service.test.ts
 │   └── tools/
