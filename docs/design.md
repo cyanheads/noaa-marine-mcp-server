@@ -6,7 +6,7 @@
 
 | Name | Description | Key Inputs | Annotations |
 |:-----|:------------|:-----------|:------------|
-| `noaa_marine_find_stations` | Find CO-OPS tide/water-level/current stations and NDBC buoys near a location or by name/state. Returns unified station list with source, type, capabilities, and coordinates. Required first step to resolve place names or coordinates to station IDs before calling data tools. | `latitude`, `longitude`, `radius_km`, `query` (name search), `state` (`z.enum` of 2-letter state/territory codes), `source` (`z.enum(['coops', 'ndbc', 'all'])`), `types` (`z.array(z.enum(['tide', 'current', 'water_level', 'buoy', 'met']))`), `limit` | `readOnlyHint: true`, `openWorldHint: true` |
+| `noaa_marine_find_stations` | Find CO-OPS tide/water-level/current stations and NDBC buoys near a location or by name/ID/state. Returns unified station list with source, type, capabilities, platform class, and coordinates. Required first step to resolve place names, coordinates, or a bare station number to station IDs before calling data tools. A zero-match search is a success carrying an applied-filter echo, not an error. | `latitude`, `longitude`, `radius_km`, `query` (name or station-ID substring, both sources), `state` (`z.enum` of 2-letter state/territory codes), `source` (`z.enum(['coops', 'ndbc', 'all'])`), `types` (`z.array(z.enum(['tide', 'current', 'water_level', 'met', 'current_profile', 'water_quality', 'buoy']))`), `limit` | `readOnlyHint: true`, `openWorldHint: true` |
 | `noaa_marine_get_tide_predictions` | High/low tide predictions for a CO-OPS tide station over a date range. Returns time, height, and tide type (H/L) for each event. Supports 6-minute interval output for detailed tide curves. Datum defaults to MLLW (mean lower low water — standard for US nautical charts). | `station_id`, `begin_date` (YYYYMMDD), `end_date` (YYYYMMDD), `datum` (`z.enum(['MLLW', 'MHHW', 'MSL', 'MTL', 'MHW', 'MLW', 'CD', 'STND'])`, default `'MLLW'`), `time_zone` (`z.enum(['lst_ldt', 'gmt', 'lst'])`, default `'lst_ldt'`), `units` (`z.enum(['english', 'metric'])`, default `'english'`), `interval` (`z.enum(['hilo', '6min'])`, default `'hilo'`) | `readOnlyHint: true`, `idempotentHint: true`, `openWorldHint: true` |
 | `noaa_marine_get_water_level` | Observed water level (real-time or historical) for a CO-OPS water-level station, with the predicted value for comparison. The difference (residual) indicates storm surge or anomalous drawdown. Returns 6-minute observations alongside predictions. Date range max 31 days per request. | `station_id`, `begin_date` (YYYYMMDD), `end_date` (YYYYMMDD), `datum` (`z.enum(['MLLW', 'MHHW', 'MSL', 'MTL', 'MHW', 'MLW', 'CD', 'STND'])`, default `'MLLW'`), `time_zone` (`z.enum(['lst_ldt', 'gmt', 'lst'])`, default `'lst_ldt'`), `units` (`z.enum(['english', 'metric'])`, default `'english'`) | `readOnlyHint: true`, `openWorldHint: true` |
 | `noaa_marine_get_currents` | Tidal current predictions for a CO-OPS current station: max flood/ebb speeds, slack times, and directions. Defaults to MAX_SLACK intervals (the practical planning view — when to pass a tricky passage). Optionally returns 6-minute continuous predictions. Station IDs for current stations use alphanumeric format (e.g., `ACT4176`), distinct from numeric tide/water-level IDs. | `station_id`, `begin_date` (YYYYMMDD), `end_date` (YYYYMMDD), `time_zone` (`z.enum(['lst_ldt', 'gmt', 'lst'])`, default `'lst_ldt'`), `units` (`z.enum(['english', 'metric'])`, default `'english'`), `interval` (`z.enum(['MAX_SLACK', '6min'])`, default `'MAX_SLACK'`) | `readOnlyHint: true`, `idempotentHint: true`, `openWorldHint: true` |
@@ -44,8 +44,10 @@ Key fields per tool — implementer must include these in the Zod `output` schem
 - For 6min: `predictions[]`: `{ time: string, speed: number, direction: number }`
 
 **`noaa_marine_get_conditions`**
-- `station_id: string`, `station_name: string`, `latitude: number`, `longitude: number`
-- `observed_at: string` — ISO timestamp of the observation row used
+- `station_id: string`, `station_name: string`, `latitude: number | null`, `longitude: number | null` — coordinates are `null` when the station has no active-stations entry, matching `get_current_profile` and `get_ocean_observations`
+- `observed_at: string` — ISO timestamp of the newest data row; always a valid instant, since a row with malformed time columns is rejected rather than timestamped with the current time
+- `waves_observed_at: string | null` — ISO timestamp of the row the four wave fields resolved from, which can be older than `observed_at`; `null` when no wave sample falls inside the 90-minute look-back window
+- `enrichment.notice: string | undefined` — present when a block other than waves resolved from a row older than `observed_at`, naming the output fields it fills and the time they were measured. Waves are excluded because `waves_observed_at` already dates them, so the rule is "disclose an age no output field states" rather than a fixed list
 - All sensor fields optional/nullable (`number | null`): `wind_direction_deg`, `wind_speed_ms`, `gust_speed_ms`, `wave_height_m`, `dominant_period_sec`, `average_period_sec`, `mean_wave_direction_deg`, `pressure_hpa`, `air_temp_c`, `water_temp_c`, `dew_point_c`, `visibility_nmi`, `tide_ft`
 - `source: 'ndbc'` — always ndbc for v0.1.0
 
@@ -55,8 +57,10 @@ Typed domain failures the implementer must enumerate in each tool's `errors: [..
 
 | Tool | reason | code | when |
 |:-----|:-------|:-----|:-----|
-| `noaa_marine_find_stations` | `no_results` | `NotFound` | No stations match the query/location/filters — agent should widen the search or try a different state/type |
+| `noaa_marine_find_stations` | `sources_unavailable` | `ServiceUnavailable` | Every station catalog the search needed failed to load — zero rows from a dead upstream is not an empty search (a zero-match search is a success, not an error) |
 | `noaa_marine_find_stations` | `incomplete_coordinates` | `InvalidParams` | Only one of latitude/longitude was supplied — proximity search needs the pair |
+| `noaa-marine://station/{station_id}` | `station_not_found` | `NotFound` | Both catalogs were read and neither carries the ID |
+| `noaa-marine://station/{station_id}` | `source_unavailable` | `ServiceUnavailable` | A catalog could not be read, and no catalog that was read carries the ID |
 | `noaa_marine_get_tide_predictions` | `station_not_found` | `InvalidParams` | CO-OPS returned an error for the station ID (likely wrong type — use a `find_stations` result) |
 | `noaa_marine_get_tide_predictions` | `date_range_exceeded` | `InvalidParams` | Requested range exceeds 1-year CO-OPS limit — split into multiple calls |
 | `noaa_marine_get_tide_predictions` | `no_predictions` | `NotFound` | Station exists but CO-OPS returned no prediction data for the date range (station inactive or type mismatch) |
@@ -67,7 +71,7 @@ Typed domain failures the implementer must enumerate in each tool's `errors: [..
 | `noaa_marine_get_currents` | `date_range_exceeded` | `InvalidParams` | Requested range exceeds 1-year CO-OPS limit — split into multiple calls |
 | `noaa_marine_get_currents` | `no_predictions` | `NotFound` | Station exists but CO-OPS returned no current-prediction data for the date range |
 | `noaa_marine_get_conditions` | `buoy_not_found` | `NotFound` | NDBC returned 404 for the station ID — find a conditions-capable station with `find_stations` using `types: ["met"]` |
-| `noaa_marine_get_conditions` | `no_sensor_data` | `NotFound` | Buoy file exists but all fields are MM (buoy offline or sensor failure) |
+| `noaa_marine_get_conditions` | `no_sensor_data` | `NotFound` | Buoy file exists but no row inside the 90-minute look-back window carries a sensor value (buoy offline or sensor failure) |
 
 ### Prompts
 
@@ -77,7 +81,7 @@ None — this server is data-oriented; no recurring interaction patterns warrant
 
 ## Overview
 
-US marine conditions via two NOAA sources: **CO-OPS** (Center for Operational Oceanographic Products and Services) for tide predictions, observed water levels, tidal currents, and coastal met data at 3,450+ stations; **NDBC** (National Data Buoy Center) for live offshore buoy observations (waves, wind, sea-surface temp, pressure) at 1,354 active stations worldwide.
+US marine conditions via two NOAA sources: **CO-OPS** (Center for Operational Oceanographic Products and Services) for tide predictions, observed water levels, tidal currents, and coastal met data at its coastal gauges; **NDBC** (National Data Buoy Center) for live offshore buoy observations (waves, wind, sea-surface temp, pressure) at its active stations worldwide.
 
 Target audience: boaters, sailors, surfers, anglers, kayakers, coastal planners, and agents answering questions like "when is high tide at Seattle this week?", "what's the swell offshore Monterey?", "how much storm surge did last night's storm produce?", or "are the currents safe to transit Admiralty Inlet right now?"
 
@@ -93,7 +97,7 @@ The server is scoped to the ocean operational workflow — tides, currents, and 
 - **Datum handling is mandatory.** Returning water levels without a stated datum is meaningless — all tools default to MLLW and expose the datum in the response so agents can reason correctly.
 - **MM = missing.** NDBC fixed-width files use `MM` for missing sensor values. These must be normalized to `null` in the output, not passed through as strings.
 - **Currents use different station IDs.** CO-OPS current stations have alphanumeric IDs (e.g., `ACT4176`) distinct from the numeric tide/water-level station IDs (e.g., `9447130`). Station discovery must surface both types clearly.
-- **Station metadata size.** CO-OPS `tidepredictions` has 3,450 stations; `waterlevels` has 301; `currentpredictions` has 4,430. NDBC active has 1,354. The station lists are bounded — mirroring is warranted for `find_stations` (see Services).
+- **Station metadata size.** Each CO-OPS list runs to a few thousand stations (`currentpredictions` is the largest, `waterlevels` the smallest by an order of magnitude), and the NDBC active list to roughly a thousand. The station lists are bounded — mirroring is warranted for `find_stations` (see Services). Exact counts move as NOAA adds and retires stations; read them from the live catalogs, never from this document.
 
 ---
 
@@ -112,7 +116,7 @@ Wraps two CO-OPS base URLs:
 - **Data:** `https://api.tidesandcurrents.noaa.gov/api/prod/datagetter` — parametric query for products (predictions, water_level, currents_predictions, water_temperature, wind, air_pressure)
 - **Metadata:** `https://api.tidesandcurrents.noaa.gov/mdapi/prod/webapi/stations.json` — station lists by type + single-station detail
 
-Station list fetching is the expensive operation (3,450–4,430 records per type). Use an in-memory cache with a 6-hour TTL so `find_stations` calls don't re-fetch on every request. Cache keyed by station type. On startup, pre-warm the two most-used types (tidepredictions, currentpredictions).
+Station list fetching is the expensive operation (a few thousand records per type). Use an in-memory cache with a 6-hour TTL so `find_stations` calls don't re-fetch on every request. Cache keyed by station type. On startup, pre-warm the two most-used types (tidepredictions, currentpredictions).
 
 The `application` courtesy param is sent on every request: `application=noaa-marine-mcp-server`.
 
@@ -121,7 +125,7 @@ CO-OPS error shape: `{ "error": { "message": "..." } }` — detected by presence
 ### NdbcService
 
 Wraps two NDBC endpoints:
-- **Active stations:** `https://www.ndbc.noaa.gov/activestations.xml` — XML, parsed once and cached (6-hour TTL). 1,354 stations with id, lat, lon, name, type, owner, met/currents/waterquality/dart flags.
+- **Active stations:** `https://www.ndbc.noaa.gov/activestations.xml` — XML, parsed once and cached (6-hour TTL). Each station carries id, lat, lon, name, type, owner, and met/currents/waterquality/dart flags.
 - **Realtime observations:** `https://www.ndbc.noaa.gov/data/realtime2/{stationId}.txt` — fixed-width text, per-buoy, fetched on demand.
 
 **NDBC fixed-width parsing** (verified against live data):
@@ -193,13 +197,13 @@ Each step is independently testable.
 
 **MLLW as default datum, not MHHW or MSL.** MLLW (mean lower low water) is the US nautical chart datum, the basis for published chart depths, and the reference mariners expect. Returning water heights relative to MLLW means the chart reads correctly. MSL is common in atmospheric science but wrong for tide tables. MHHW is used for flooding/inundation work. All are valid options but MLLW is the default because it's right for the primary audience.
 
-**CO-OPS station list in-memory cache (6-hour TTL).** The station lists are large (3,450–4,430 stations) and change rarely (NOAA adds/removes stations monthly at most). Fetching the full list on every `find_stations` call would make discovery slow and impose unnecessary load on NOAA. An in-memory cache with 6-hour TTL is a good fit: no SQLite dependency, no cross-session persistence needed, predictable memory (each list is roughly 2–4 MB JSON).
+**CO-OPS station list in-memory cache (6-hour TTL).** The station lists are large (a few thousand stations each) and change rarely (NOAA adds/removes stations monthly at most). Fetching the full list on every `find_stations` call would make discovery slow and impose unnecessary load on NOAA. An in-memory cache with 6-hour TTL is a good fit: no SQLite dependency, no cross-session persistence needed, predictable memory (each list is roughly 2–4 MB JSON).
 
 **Currents use `MAX_SLACK` interval by default.** The raw 6-minute current data is primarily useful for charting or integrating total flow. For passage planning — "is there a slack window to run the inlet?" — the MAX_SLACK interval (which returns only max flood, max ebb, and slack events) is far more actionable. Agents that need the full curve can pass `interval: "6min"`.
 
 **NDBC observations are SI units with two exceptions.** NDBC realtime text files emit metric (m/s, m, hPa, °C) for most fields. Exceptions: `TIDE` is in feet, `VIS` is in nautical miles — both are rarely populated at offshore buoys and will typically be `null`. There is no unit switching at the NDBC layer. The output schema documents units per-field so agents know wave heights are in meters, wind is in m/s, etc., regardless of what `units` they'd set for CO-OPS tools.
 
-**`get_conditions` is NDBC-only (v0.1.0).** CO-OPS met (wind, air pressure, water temperature) is available at about 150 stations but requires co-location detection to match CO-OPS station IDs against NDBC buoy IDs. For v0.1.0, the tool accepts a single `station_id` and routes to NDBC only — the `source` parameter is omitted to avoid exposing a half-implemented CO-OPS path. CO-OPS met enrichment can be added in a later iteration once co-location logic is implemented.
+**`get_conditions` is NDBC-only (v0.1.0).** CO-OPS met (wind, air pressure, water temperature) is available at a minority of its stations but requires co-location detection to match CO-OPS station IDs against NDBC buoy IDs. For v0.1.0, the tool accepts a single `station_id` and routes to NDBC only — the `source` parameter is omitted to avoid exposing a half-implemented CO-OPS path. CO-OPS met enrichment can be added in a later iteration once co-location logic is implemented.
 
 **`water_level` fetches paired predictions.** The raw water level number alone is only half the picture — it means little without the predicted value for the same time. The residual (observed − predicted) is the storm surge or drawdown. Fetching both in parallel and returning them together lets the agent give a complete answer without requiring a second tool call.
 
@@ -210,8 +214,8 @@ Each step is independently testable.
 ## Known Limitations
 
 - **CO-OPS date range limits:** `get_tide_predictions` and `get_currents` max 1 year per request; `get_water_level` max 31 days (6-minute data). Enforced by input validation in each tool (`date_range_exceeded` typed error); agents must split longer ranges across multiple calls.
-- **NDBC realtime lag:** observations are reported every 10 minutes; the most recent data point can be up to 10–20 minutes old when fetched. Not a real-time streaming feed.
-- **CO-OPS currents predictions are not available everywhere.** The 4,430 current stations cover major US passages, channels, and harbors — not every waterway. Agents should use `find_stations` with `types: ["current"]` to verify coverage before calling `get_currents`.
+- **NDBC realtime lag:** row cadence varies by station — 5, 6, 10, 15, 20, 30, and 60 minutes all occur — so the most recent data point can be that old when fetched. NDBC also writes each block of columns on its own pass, so `get_conditions` resolves a block from the most recent row within 90 minutes that carried it: waves report that row's time as `waves_observed_at`, and any other block read from an earlier row is named with its measurement time in the response notice. Not a real-time streaming feed.
+- **CO-OPS currents predictions are not available everywhere.** CO-OPS current stations cover major US passages, channels, and harbors — not every waterway. Agents should use `find_stations` with `types: ["current"]` to verify coverage before calling `get_currents`.
 - **Global wave forecast:** NDBC covers US coastal/offshore waters primarily. For global wave forecast at any coordinate, `open-meteo`'s marine tool is the right complement.
 - **No historical NDBC data.** The `realtime2` files contain only the most recent ~45 days. For historical buoy data, NDBC's archive API (not implemented here) would be needed.
 

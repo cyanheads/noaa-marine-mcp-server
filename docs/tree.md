@@ -1,6 +1,6 @@
 # noaa-marine-mcp-server - Directory Structure
 
-Generated on: 2026-09-16 10:38:18
+Generated on: 2026-09-17 17:01:50
 
 ```text
 noaa-marine-mcp-server/
@@ -14,6 +14,8 @@ noaa-marine-mcp-server/
 │   │   ├── bug_report.yml
 │   │   ├── config.yml
 │   │   └── feature_request.yml
+│   ├── workflows/
+│   │   └── codeql.yml
 │   ├── CODE_OF_CONDUCT.md
 │   ├── CONTRIBUTING.md
 │   ├── FUNDING.yml
@@ -25,6 +27,7 @@ noaa-marine-mcp-server/
 │   ├── 0.1.x/
 │   ├── 0.2.x/
 │   ├── 0.3.x/
+│   ├── 0.4.x/
 │   └── template.md
 ├── docs/
 │   ├── design.md
@@ -132,6 +135,7 @@ noaa-marine-mcp-server/
 │   ├── list-skills.ts
 │   ├── release-github.ts
 │   └── tree.ts
+├── skills/
 ├── src/
 │   ├── config/
 │   │   └── server-config.ts

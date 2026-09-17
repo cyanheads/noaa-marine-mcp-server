@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.3.2-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/noaa-marine-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/noaa-marine-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/noaa-marine-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.4.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/noaa-marine-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/noaa-marine-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/noaa-marine-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -55,11 +55,13 @@ All resource data is also reachable via tools — use `noaa_marine_find_stations
 
 ### `noaa_marine_find_stations` <sub>tool</sub>
 
-- Filter by proximity (`latitude`/`longitude` + `radius_km`, default 100 km, max 1000 km), name/ID substring, US state/territory (CO-OPS only), source (`coops`/`ndbc`/`all`), or `types`: data capabilities (`tide`, `current`, `water_level`, `met`, `current_profile`) or NDBC platform class (`buoy`)
+- Filter by proximity (`latitude`/`longitude` + `radius_km`, default 100 km, max 1000 km), name/ID substring (matched against both sources; an exact ID match sorts first), US state/territory (CO-OPS only), source (`coops`/`ndbc`/`all`), or `types`: data capabilities (`tide`, `current`, `water_level`, `met`, `current_profile`, `water_quality`) or NDBC platform class (`buoy`)
 - Returns up to `limit` (default 20, max 200) unified stations with source, coordinates, distance, data capabilities, and — for NDBC — physical platform class (buoy, fixed, oilrig, dart, tao, usv, other)
 - `total_found` and `truncated` report the full match count before the limit is applied
+- Zero matches is a success with `total_found: 0`, carrying a notice derived from the filters that were applied and an echo of the applied search
+- A catalog that fails to load is reported as an unread source alongside the results; when every needed catalog fails, that is a typed `sources_unavailable` error rather than an empty search
 - Station lists are cached in-memory with a 6-hour TTL — first call after startup may be slightly slower
-- Typed `incomplete_coordinates` error when only one of latitude/longitude is supplied; `no_results` when nothing matches
+- Typed `incomplete_coordinates` error when only one of latitude/longitude is supplied
 
 ---
 
@@ -75,7 +77,7 @@ All resource data is also reachable via tools — use `noaa_marine_find_stations
 ### `noaa_marine_get_water_level` <sub>tool</sub>
 
 - 6-minute observed water level with quality flags (`p` preliminary, `v` verified) and optional sensor `sigma`
-- Paired 6-minute tide predictions fetched in parallel — failure degrades gracefully, observed levels still return
+- Paired 6-minute tide predictions fetched in parallel — the observed series returns either way, and `predictions_status` says whether an empty prediction series means CO-OPS has none or the fetch failed
 - `residual_summary` (max surge, max drawdown) only when both series are present
 - Up to 31 days per request; typed `date_range_exceeded`, `station_not_found`, and `no_data` errors
 
@@ -94,8 +96,9 @@ All resource data is also reachable via tools — use `noaa_marine_find_stations
 
 - Wave height/period/direction, wind speed/gust/direction, sea-surface and air temperature, dew point, barometric pressure
 - All values SI except `tide_ft` (feet) and `visibility_nmi` (nautical miles), both rarely populated at offshore buoys
-- Every sensor field is nullable — `null` when the buoy did not report, never a fabricated value
-- Updated roughly every 10 minutes; typed `buoy_not_found` and `no_sensor_data` errors
+- Every sensor field is nullable — `null` when the buoy did not report, never a fabricated value. `latitude`/`longitude` are `null` for a station absent from the NDBC catalog, and `observed_at` is always a valid instant
+- NDBC writes each block of columns on its own cycle, so a block resolves from the most recent row within 90 minutes that carried it: waves report their own `waves_observed_at`, and any other block read from an earlier row is named with its measurement time in the response notice. Row cadence runs 5–60 minutes depending on the station
+- Typed `buoy_not_found` and `no_sensor_data` errors
 
 ---
 
@@ -113,7 +116,7 @@ All resource data is also reachable via tools — use `noaa_marine_find_stations
 - Water temperature, conductivity, salinity, dissolved oxygen (% and ppm), chlorophyll, turbidity, pH, and redox potential per depth
 - Water-column counterpart to `noaa_marine_get_conditions` (surface weather and sea state)
 - Sensor coverage is sparse — most stations report only temperature and salinity; unreported values are `null`, never a fabricated zero
-- No capability filter identifies ocean-sensor coverage — call on candidate `source="ndbc"` IDs and expect `observations_not_found` on stations with no `.ocean` file
+- Find candidates with `find_stations` using `source="ndbc"` and `types: ["water_quality"]`, NDBC's own water-quality catalog flag — a strong hint, not a guarantee, so expect `observations_not_found` on a flagged station serving no `.ocean` file
 
 ---
 
@@ -121,6 +124,7 @@ All resource data is also reachable via tools — use `noaa_marine_find_stations
 
 - Station record as `application/json` — name, coordinates, source, capabilities, state, and (NDBC) platform class
 - `station_id` comes from `noaa_marine_find_stations`
+- Typed `station_not_found` when both catalogs were read and neither carries the ID, and `source_unavailable` when a catalog could not be read — a station only the unread catalog carries is never reported as nonexistent
 - Cached with a 6-hour TTL (`cacheHint`)
 
 ## Features
