@@ -6,6 +6,7 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getCoopsService } from '@/services/coops/coops-service.js';
+import { currentPredictionClass, tidePredictionClass } from '@/services/coops/prediction-class.js';
 import { getNdbcService } from '@/services/ndbc/ndbc-service.js';
 
 /** Haversine distance in km between two lat/lon pairs. */
@@ -83,6 +84,42 @@ const COOPS_FILTER_VALUES: readonly string[] = ['tide', 'current', 'water_level'
 
 /** Filter values only an NDBC row can carry — three data capabilities plus the buoy platform token. */
 const NDBC_FILTER_VALUES: readonly string[] = ['met', 'current_profile', 'water_quality', 'buoy'];
+
+/**
+ * One depth bin a CO-OPS current station publishes predictions for. The catalog lists one
+ * row per bin; they collapse onto a single station row as this array so a multi-bin station
+ * does not consume several of the caller's result slots.
+ */
+const CurrentBinSchema = z
+  .object({
+    bin: z
+      .number()
+      .describe(
+        'CO-OPS bin number — pass it as the bin input of noaa_marine_get_currents. Omitting bin there selects the shallowest bin.',
+      ),
+    depth: z
+      .number()
+      .nullable()
+      .describe(
+        "Bin depth in FEET. The catalog publishes one figure with no unit switch, unlike the depth noaa_marine_get_currents echoes, which follows that call's units. Null when CO-OPS publishes no depth for the bin, which is usual where depth_type is U.",
+      ),
+    depth_type: z
+      .string()
+      .optional()
+      .describe(
+        'CO-OPS depth-reference code as published: B, S, or U. A U bin usually carries no depth. Omitted when the catalog row has none.',
+      ),
+    prediction_class: z
+      .string()
+      .optional()
+      .describe(
+        "CO-OPS prediction class for this bin: harmonic (predicted from the bin's own harmonic analysis) or subordinate (derived by offsets from a reference station) both serve the normal flood/ebb/slack series, while weak_and_variable may instead answer noaa_marine_get_currents with a coverage statement and no events, or report that no predictions are published at all. The class is per bin because one station can mix classes across its bins. An unrecognized catalog code is passed through verbatim.",
+      ),
+  })
+  .describe(
+    'One depth bin CO-OPS publishes current predictions for at this station, with its depth and prediction class.',
+  );
+type CurrentBin = z.infer<typeof CurrentBinSchema>;
 
 /**
  * The narrowing dimensions the handler applied, echoed on a zero-match search so the
@@ -212,7 +249,7 @@ function describeEmptySearch(applied: AppliedSearch): string {
 
 export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
   title: 'Find Marine Stations',
-  description: `Find CO-OPS tide, water-level and current stations and NDBC buoys near a location, by name, or by station ID, returning a unified list with source, data capabilities, coordinates, and — for NDBC — the physical platform class. This is the required first step for resolving a place name, a coordinate pair, or a bare station number to the station IDs the data tools take: CO-OPS tide and water-level IDs are numeric (e.g. 9447130 for Seattle), CO-OPS current IDs are alphanumeric (e.g. ACT4176), and NDBC buoy IDs are 5-character alphanumeric codes (e.g. 46041). Two axes are reported separately — capabilities and type name the data products a station serves (tide, current, water_level, met, current_profile, water_quality), while platform is the NDBC physical classification (buoy, fixed, oilrig, dart, tao, usv, other) that CO-OPS stations do not carry. Supply latitude and longitude together for a proximity search, or query for a name-or-ID substring matched against both sources, or state for CO-OPS coverage in one state; the filters combine, and results lead with an exact ID match unless a proximity search is ordering them by distance. A search that matches nothing is a success with total_found: 0 carrying an echo of the filters that were applied, and a search whose catalogs did not all answer says which source is missing. Note that CO-OPS current stations are cataloged by monitoring capability rather than prediction availability, so when noaa_marine_get_currents returns no_predictions for one, try the next nearest current station.`,
+  description: `Find CO-OPS tide, water-level and current stations and NDBC buoys near a location, by name, or by station ID, returning a unified list with source, data capabilities, coordinates, and — for NDBC — the physical platform class. This is the required first step for resolving a place name, a coordinate pair, or a bare station number to the station IDs the data tools take: CO-OPS tide and water-level IDs are numeric (e.g. 9447130 for Seattle), CO-OPS current IDs are alphanumeric (e.g. ACT4176), and NDBC buoy IDs are 5-character alphanumeric codes (e.g. 46041). Two axes are reported separately — capabilities and type name the data products a station serves (tide, current, water_level, met, current_profile, water_quality), while platform is the NDBC physical classification (buoy, fixed, oilrig, dart, tao, usv, other) that CO-OPS stations do not carry. Supply latitude and longitude together for a proximity search, or query for a name-or-ID substring matched against both sources, or state for CO-OPS coverage in one state; the filters combine, and results lead with an exact ID match unless a proximity search is ordering them by distance. A search that matches nothing is a success with total_found: 0 carrying an echo of the filters that were applied, and a search whose catalogs did not all answer says which source is missing. CO-OPS prediction stations carry a third axis as well, prediction_class, which says what a station can actually answer: a tide station is either reference, serving both hilo and the 6-minute curve, or subordinate, serving hilo only, while a current station carries its class per depth bin in bins[] — a harmonic or subordinate bin serves the normal flood/ebb/slack series, and a weak_and_variable bin may instead answer noaa_marine_get_currents with a coverage statement and no events, or report that CO-OPS publishes no predictions for it at all, so prefer a harmonic bin when one is in range.`,
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   input: z.object({
@@ -352,6 +389,24 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
                   'current_profile, water_quality (NDBC). Empty when the station reports no data capability — ' +
                   'platform still identifies it.',
               ),
+            prediction_class: z
+              .string()
+              .optional()
+              .describe(
+                'CO-OPS TIDE-prediction class: reference (predicted from the station\'s own harmonic analysis, serving both hilo and the 6-minute curve) or subordinate (high and low events derived as offsets from a reference station, hilo only — noaa_marine_get_tide_predictions rejects interval="6min" for it). A third axis beside type/capabilities (data products) and platform (NDBC physical class). Omitted for a station with no tide-prediction row; a current station carries its class per bin in bins[], where subordinate means something different. An unrecognized catalog code is passed through verbatim.',
+              ),
+            reference_id: z
+              .string()
+              .optional()
+              .describe(
+                'The reference station a subordinate tide station derives its offsets from — the station to request a 6-minute curve from. Omitted for a reference station and for any station with no tide-prediction row.',
+              ),
+            bins: z
+              .array(CurrentBinSchema)
+              .optional()
+              .describe(
+                'Depth bins this current station publishes predictions for, in the order CO-OPS publishes them. Each bin has its own depth and prediction class, and its bin number is what noaa_marine_get_currents takes as bin. Omitted for a station with no current-prediction rows.',
+              ),
           })
           .describe('A single station matching the search criteria.'),
       )
@@ -430,12 +485,15 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
     const ndbcSvc = getNdbcService();
 
     interface StationResult {
+      bins?: CurrentBin[];
       capabilities: string[];
       distance_km?: number;
       latitude: number;
       longitude: number;
       name: string;
       platform?: string;
+      prediction_class?: string;
+      reference_id?: string;
       source: 'coops' | 'ndbc';
       state?: string;
       station_id: string;
@@ -553,6 +611,25 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
       addCapability(currentStations, 'current');
       addCapability(waterLevelStations, 'water_level');
 
+      // The prediction class sits on a different axis in each catalog, so each is read from
+      // its own rows rather than from whichever row landed in the merged map first.
+      const tideRowById = new Map(tideStations.map((s) => [s.id, s]));
+
+      // `currentpredictions` publishes one row per depth bin, so a multi-bin station appears
+      // several times. Collect the bins onto one row, each keeping its own depth and class —
+      // stations that mix classes across their bins have no single station-level class.
+      const binsById = new Map<string, CurrentBin[]>();
+      for (const s of currentStations) {
+        if (s.currbin === undefined) continue;
+        const bin: CurrentBin = { bin: s.currbin, depth: s.depth ?? null };
+        if (s.depthType) bin.depth_type = s.depthType;
+        const binClass = currentPredictionClass(s.type);
+        if (binClass) bin.prediction_class = binClass;
+        const bins = binsById.get(s.id);
+        if (bins) bins.push(bin);
+        else binsById.set(s.id, [bin]);
+      }
+
       for (const s of allCoops.values()) {
         if (!matchesTypeFilter(s.capabilities)) continue;
         if (input.state && s.state !== input.state) continue;
@@ -569,6 +646,14 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
         const coopsType = primaryTypeFor(s.capabilities);
         if (coopsType) entry.type = coopsType;
         if (s.state) entry.state = s.state;
+
+        const tideRow = tideRowById.get(s.id);
+        const predictionClass = tidePredictionClass(tideRow?.type);
+        if (predictionClass) entry.prediction_class = predictionClass;
+        // A reference station's row carries `reference_id` as an empty string.
+        if (tideRow?.reference_id) entry.reference_id = tideRow.reference_id;
+        const bins = binsById.get(s.id);
+        if (bins && bins.length > 0) entry.bins = bins;
 
         if (center) {
           const dist = haversineKm(center.lat, center.lon, s.lat, s.lng);
@@ -714,13 +799,26 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
       const state = s.state ? ` · ${s.state}` : '';
       const typeStr = s.type ? ` · **Type:** ${s.type}` : '';
       const platformStr = s.platform ? ` · **Platform:** ${s.platform}` : '';
+      const classStr = s.prediction_class ? ` · **Prediction class:** ${s.prediction_class}` : '';
       lines.push(
         `### ${s.name} (${s.station_id})`,
-        `**Source:** ${s.source.toUpperCase()}${typeStr}${platformStr}${dist}${state}`,
+        `**Source:** ${s.source.toUpperCase()}${typeStr}${platformStr}${classStr}${dist}${state}`,
         `**Coordinates:** ${s.latitude}, ${s.longitude}`,
         `**Capabilities:** ${s.capabilities.length > 0 ? s.capabilities.join(', ') : 'none reported'}`,
-        '',
       );
+      if (s.bins && s.bins.length > 0) {
+        const bins = s.bins.map((b) => {
+          const depth = b.depth !== null ? `${b.depth} ft` : 'depth not published';
+          const depthType = b.depth_type ? `, ${b.depth_type}` : '';
+          const binClass = b.prediction_class ? `, ${b.prediction_class}` : '';
+          return `${b.bin} (${depth}${depthType}${binClass})`;
+        });
+        lines.push(`**Current bins:** ${bins.join(' · ')}`);
+      }
+      if (s.reference_id) {
+        lines.push(`**Reference station:** ${s.reference_id}`);
+      }
+      lines.push('');
     }
     return [{ type: 'text', text: lines.join('\n') }];
   },

@@ -937,6 +937,192 @@ describe('noaaMarineFindStations', () => {
     expect(structured).not.toHaveProperty('sources');
   });
 
+  // --- #26/#27: the CO-OPS prediction class and the current-prediction depth bins ---
+
+  /** PUG1515 — one `currentpredictions` row per depth bin, all harmonic, catalog depths in feet. */
+  const COOPS_MULTI_BIN_CURRENT = [
+    {
+      id: 'PUG1515',
+      name: 'West Point, West of',
+      lat: 47.662,
+      lng: -122.4417,
+      currbin: 15,
+      depth: 16,
+      depthType: 'B',
+      type: 'H',
+    },
+    {
+      id: 'PUG1515',
+      name: 'West Point, West of',
+      lat: 47.662,
+      lng: -122.4417,
+      currbin: 10,
+      depth: 49,
+      depthType: 'B',
+      type: 'H',
+    },
+    {
+      id: 'PUG1515',
+      name: 'West Point, West of',
+      lat: 47.662,
+      lng: -122.4417,
+      currbin: 1,
+      depth: 108,
+      depthType: 'B',
+      type: 'H',
+    },
+  ];
+
+  /** A station whose bins do not share one class — a station-level class would be wrong for it. */
+  const COOPS_MIXED_CLASS_BINS = [
+    {
+      id: 'BOS1104',
+      name: 'Boston Harbor Approach',
+      lat: 42.33,
+      lng: -70.9,
+      currbin: 1,
+      depth: 12,
+      depthType: 'B',
+      type: 'H',
+    },
+    {
+      id: 'BOS1104',
+      name: 'Boston Harbor Approach',
+      lat: 42.33,
+      lng: -70.9,
+      currbin: 2,
+      depth: null,
+      depthType: 'U',
+      type: 'W',
+    },
+  ];
+
+  /** Hungry Harbor — a subordinate tide station deriving its events from Astoria (Tongue Point). */
+  const COOPS_SUBORDINATE_TIDE = {
+    id: '9440563',
+    name: 'Hungry Harbor, Wash.',
+    lat: 46.2583,
+    lng: -123.848,
+    state: 'WA',
+    type: 'S',
+    reference_id: '9439040',
+  };
+
+  it('collapses the per-bin catalog rows into one station row carrying every bin', async () => {
+    const ctx = createMockContext({ errors: noaaMarineFindStations.errors });
+    await mockCatalog({ currentpredictions: COOPS_MULTI_BIN_CURRENT });
+
+    const input = noaaMarineFindStations.input.parse({ query: 'PUG1515', source: 'coops' });
+    const result = await noaaMarineFindStations.handler(input, ctx);
+
+    expect(result.stations).toHaveLength(1);
+    const row = result.stations[0]!;
+    expect(row.capabilities).toEqual(['current']);
+    expect(row.bins).toEqual([
+      { bin: 15, depth: 16, depth_type: 'B', prediction_class: 'harmonic' },
+      { bin: 10, depth: 49, depth_type: 'B', prediction_class: 'harmonic' },
+      { bin: 1, depth: 108, depth_type: 'B', prediction_class: 'harmonic' },
+    ]);
+    // The class of a current station lives on its bins, never on the row.
+    expect(row.prediction_class).toBeUndefined();
+  });
+
+  it('keeps each bin of a mixed-class station on its own class, past the first bin', async () => {
+    const ctx = createMockContext({ errors: noaaMarineFindStations.errors });
+    await mockCatalog({ currentpredictions: COOPS_MIXED_CLASS_BINS });
+
+    const input = noaaMarineFindStations.input.parse({ query: 'BOS1104', source: 'coops' });
+    const result = await noaaMarineFindStations.handler(input, ctx);
+
+    const bins = result.stations[0]!.bins!;
+    expect(bins).toHaveLength(2);
+    expect(bins[0]!.prediction_class).toBe('harmonic');
+    expect(bins[1]!.prediction_class).toBe('weak_and_variable');
+    // A bin CO-OPS publishes no depth for stays null rather than becoming a zero.
+    expect(bins[1]!.depth).toBeNull();
+    expect(bins[1]!.depth_type).toBe('U');
+  });
+
+  it('reports the tide prediction class and reference station on a subordinate tide row', async () => {
+    const ctx = createMockContext({ errors: noaaMarineFindStations.errors });
+    await mockCatalog({ tidepredictions: [COOPS_SUBORDINATE_TIDE] });
+
+    const input = noaaMarineFindStations.input.parse({ query: '9440563', source: 'coops' });
+    const result = await noaaMarineFindStations.handler(input, ctx);
+
+    const row = result.stations[0]!;
+    expect(row.prediction_class).toBe('subordinate');
+    expect(row.reference_id).toBe('9439040');
+    // A tide station has one catalog row, so it carries no bins.
+    expect(row.bins).toBeUndefined();
+  });
+
+  it('reports a reference tide station as reference and omits its empty reference_id', async () => {
+    const ctx = createMockContext({ errors: noaaMarineFindStations.errors });
+    await mockCatalog({ tidepredictions: [{ ...COOPS_TIDE_STATION, reference_id: '' }] });
+
+    const input = noaaMarineFindStations.input.parse({ query: '9447130', source: 'coops' });
+    const result = await noaaMarineFindStations.handler(input, ctx);
+
+    expect(result.stations[0]!.prediction_class).toBe('reference');
+    expect(result.stations[0]!.reference_id).toBeUndefined();
+  });
+
+  it('passes an unrecognized catalog class code through verbatim rather than dropping it', async () => {
+    const ctx = createMockContext({ errors: noaaMarineFindStations.errors });
+    await mockCatalog({
+      tidepredictions: [{ ...COOPS_TIDE_STATION, type: 'Z' }],
+      currentpredictions: [{ ...COOPS_MULTI_BIN_CURRENT[0]!, type: 'Q' }],
+    });
+
+    const input = noaaMarineFindStations.input.parse({ source: 'coops', limit: 10 });
+    const result = await noaaMarineFindStations.handler(input, ctx);
+
+    const tide = result.stations.find((s) => s.station_id === '9447130')!;
+    const current = result.stations.find((s) => s.station_id === 'PUG1515')!;
+    expect(tide.prediction_class).toBe('Z');
+    expect(current.bins![0]!.prediction_class).toBe('Q');
+  });
+
+  it('carries the prediction class, bins, and reference station onto both surfaces', async () => {
+    await mockCatalog({
+      tidepredictions: [COOPS_SUBORDINATE_TIDE],
+      currentpredictions: COOPS_MULTI_BIN_CURRENT,
+    });
+
+    const result = await runToolContract(noaaMarineFindStations, { source: 'coops', limit: 10 });
+    expect(result.isError).toBeFalsy();
+
+    const structured = result.structuredContent as {
+      stations: { station_id: string; bins?: unknown[]; prediction_class?: string }[];
+    };
+    expect(structured.stations.find((s) => s.station_id === 'PUG1515')?.bins).toHaveLength(3);
+    expect(structured.stations.find((s) => s.station_id === '9440563')?.prediction_class).toBe(
+      'subordinate',
+    );
+
+    const text = result.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
+    expect(text).toContain('subordinate');
+    expect(text).toContain('9439040');
+    expect(text).toContain('harmonic');
+    expect(text).toContain('108');
+  });
+
+  it('leaves a water-level-only station without a prediction class', async () => {
+    const ctx = createMockContext({ errors: noaaMarineFindStations.errors });
+    // The waterlevels catalog publishes no `type` field at all.
+    await mockCatalog({
+      waterlevels: [{ id: '9440083', name: 'Wauna', lat: 46.16, lng: -123.41, state: 'OR' }],
+    });
+
+    const input = noaaMarineFindStations.input.parse({ source: 'coops', limit: 5 });
+    const result = await noaaMarineFindStations.handler(input, ctx);
+
+    expect(result.stations[0]!.capabilities).toEqual(['water_level']);
+    expect(result.stations[0]!.prediction_class).toBeUndefined();
+    expect(result.stations[0]!.bins).toBeUndefined();
+  });
+
   it('format renders station_id, name, source, and capabilities', () => {
     const output = {
       total_found: 1,
