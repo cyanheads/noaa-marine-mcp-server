@@ -7,11 +7,13 @@ import type { Context } from '@cyanheads/mcp-ts-core';
 import { notFound, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import { fetchWithTimeout, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import type {
+  NdbcColumnGroup,
   NdbcCurrentBin,
   NdbcCurrentProfile,
   NdbcObservation,
   NdbcOceanObservation,
   NdbcOceanReading,
+  NdbcStaleGroup,
   NdbcStation,
 } from './types.js';
 
@@ -28,6 +30,139 @@ interface StationCache {
   fetchedAt: number;
   stations: NdbcStation[];
 }
+
+/**
+ * One `name="value"` pair of a station element's attribute list. Matching the whole list in a
+ * single pass keeps the parse to one regex per station rather than one per attribute read, and
+ * matches each name in full, so a short name can never match the tail of a longer one.
+ */
+const ATTRIBUTE_REGEX = /([\w:.-]+)="([^"]*)"/g;
+
+/** The named XML character references that can appear in the active-stations feed. */
+const XML_ENTITIES: Record<string, string> = {
+  amp: '&',
+  apos: "'",
+  gt: '>',
+  lt: '<',
+  quot: '"',
+};
+
+/**
+ * Decode XML character references — named, decimal, and hex — in a single pass.
+ * One replacer is what makes the decode order-independent: a chained decoder that
+ * expanded `&amp;` before the named entities would turn a literal `&amp;quot;` into a
+ * bare quote. A value carrying no references is returned unchanged.
+ */
+function decodeXmlEntities(value: string): string {
+  return value.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (match, ref: string) => {
+    if (ref.startsWith('#')) {
+      const hex = ref[1] === 'x' || ref[1] === 'X';
+      const code = Number.parseInt(hex ? ref.slice(2) : ref.slice(1), hex ? 16 : 10);
+      return Number.isNaN(code) || code < 0 || code > 0x10ffff ? match : String.fromCodePoint(code);
+    }
+    return XML_ENTITIES[ref.toLowerCase()] ?? match;
+  });
+}
+
+/** An NDBC row's observation time: the ISO instant plus its epoch milliseconds. */
+interface NdbcRowTime {
+  epochMs: number;
+  iso: string;
+}
+
+const pad2 = (n: number): string => String(n).padStart(2, '0');
+
+/** A time column is usable only as a bare non-negative integer — `MM` and junk are not. */
+const timeComponent = (token: string | null | undefined): number | null =>
+  token !== null && token !== undefined && /^\d{1,4}$/.test(token)
+    ? Number.parseInt(token, 10)
+    : null;
+
+/**
+ * Build a validated instant from a realtime row's five leading time columns (YY MM DD hh mm).
+ * Returns null when any column is absent, is NDBC's `MM` missing marker, is non-numeric, or
+ * forms a date that does not exist (month 13, day 32, 31 February) — callers skip such a row
+ * instead of emitting a fabricated current time or a string `Date.parse` rejects. NDBC writes
+ * 4-digit years in the YY column, so a value ≥ 1000 is already a full year.
+ */
+function parseRowTime(
+  yy: string | null | undefined,
+  mo: string | null | undefined,
+  dd: string | null | undefined,
+  hh: string | null | undefined,
+  mn: string | null | undefined,
+): NdbcRowTime | null {
+  const rawYear = timeComponent(yy);
+  const month = timeComponent(mo);
+  const day = timeComponent(dd);
+  const hour = timeComponent(hh);
+  const minute = timeComponent(mn);
+  if (
+    rawYear === null ||
+    month === null ||
+    day === null ||
+    hour === null ||
+    minute === null ||
+    month < 1 ||
+    month > 12 ||
+    day < 1 ||
+    hour > 23 ||
+    minute > 59
+  ) {
+    return null;
+  }
+
+  const year = rawYear >= 1000 ? rawYear : rawYear < 50 ? 2000 + rawYear : 1900 + rawYear;
+  const epochMs = Date.UTC(year, month - 1, day, hour, minute);
+  const asDate = new Date(epochMs);
+  // Date.UTC rolls an impossible day forward (31 February → 3 March); reject it instead.
+  if (asDate.getUTCMonth() !== month - 1 || asDate.getUTCDate() !== day) return null;
+
+  return {
+    epochMs,
+    iso: `${year}-${pad2(month)}-${pad2(day)}T${pad2(hour)}:${pad2(minute)}:00Z`,
+  };
+}
+
+/**
+ * Walk reverse-chronological `.adcp`/`.ocean` data rows — whose five time columns are always
+ * the first five tokens — and return the newest one that carries a valid timestamp, skipping
+ * any row whose time columns are malformed. Null when no row in the file is usable.
+ */
+function findLatestTimestampedRow(
+  dataLines: string[],
+): { index: number; time: NdbcRowTime; values: string[] } | null {
+  for (const [index, line] of dataLines.entries()) {
+    const values = line.split(/\s+/);
+    const time = parseRowTime(values[0], values[1], values[2], values[3], values[4]);
+    if (time) return { index, time, values };
+  }
+  return null;
+}
+
+/**
+ * Look-back window for resolving a column block from an earlier row, measured back from the
+ * newest row's timestamp. The slowest wave cadence observed across the live feeds is 60
+ * minutes, so 90 clears every station with margin while keeping a stale reading — one station
+ * carries a 38-day-old pressure value — out of a result presented as current.
+ */
+const GROUP_LOOKBACK_MS = 90 * 60 * 1000;
+
+/**
+ * Column blocks the realtime2 feed writes on independent processing cycles. A buoy emits a
+ * met row every 5–60 minutes while its wave-processing pass runs on its own slower cycle,
+ * leaving that block's columns `MM` on the rows in between. Each block resolves from the most
+ * recent row inside GROUP_LOOKBACK_MS that carries any of its columns, and every field of the
+ * block is read from that one row — a block is never assembled out of several rows.
+ */
+const COLUMN_GROUPS = {
+  atmosphere: ['PRES', 'ATMP', 'DEWP'],
+  tide: ['TIDE'],
+  visibility: ['VIS'],
+  water: ['WTMP'],
+  wave: ['WVHT', 'DPD', 'APD', 'MWD'],
+  wind: ['WDIR', 'WSPD', 'GST'],
+} as const satisfies Record<NdbcColumnGroup, readonly string[]>;
 
 export class NdbcService {
   private stationCache: StationCache | null = null;
@@ -165,9 +300,8 @@ export class NdbcService {
       throw serviceUnavailable(`NDBC ADCP file for ${stationId} has no header row.`);
     }
 
-    // Rows are reverse-chronological, so the first non-header line is the latest observation.
-    const dataLine = lines.find((l) => !l.startsWith('#'));
-    if (!dataLine) {
+    const dataLines = lines.filter((l) => !l.startsWith('#'));
+    if (dataLines.length === 0) {
       throw notFound(
         `NDBC station ${stationId} has no current-profile data rows — station may be offline.`,
         {
@@ -177,7 +311,18 @@ export class NdbcService {
       );
     }
 
-    const tokens = dataLine.split(/\s+/);
+    // Rows are reverse-chronological, so the latest observation is the newest row whose five
+    // time columns form a real date. A row that fails that is skipped rather than fatal —
+    // one malformed row upstream must not cost the caller the whole profile.
+    const latest = findLatestTimestampedRow(dataLines);
+    if (!latest) {
+      throw serviceUnavailable(
+        `NDBC ADCP file for ${stationId} carries no row with a valid observation timestamp — every row's time columns are malformed upstream.`,
+        { stationId },
+      );
+    }
+
+    const tokens = latest.values;
     const bins: NdbcCurrentBin[] = [];
     // Direction/speed are null when NDBC wrote the literal `MM` for that component.
     const parseComponent = (tok: string | undefined): number | null => {
@@ -206,19 +351,7 @@ export class NdbcService {
       );
     }
 
-    // Build the ISO timestamp from the YY MM DD hh mm columns. NDBC emits 4-digit years in
-    // the YY column, so treat values ≥ 1000 as already-full years (mirrors parseRealtimeText).
-    const [yy, mo, dd, hh, mn] = tokens;
-    const observedAt =
-      yy && mo && dd && hh && mn
-        ? (() => {
-            const n = Number.parseInt(yy, 10);
-            const year = n >= 1000 ? n : n < 50 ? 2000 + n : 1900 + n;
-            return `${year}-${mo.padStart(2, '0')}-${dd.padStart(2, '0')}T${hh.padStart(2, '0')}:${mn.padStart(2, '0')}:00Z`;
-          })()
-        : new Date().toISOString();
-
-    return { observedAt, bins };
+    return { observedAt: latest.time.iso, bins };
   }
 
   /**
@@ -242,11 +375,20 @@ export class NdbcService {
     }
 
     const dataLines = lines.filter((l) => !l.startsWith('#'));
-    const firstDataLine = dataLines[0];
-    if (firstDataLine === undefined) {
+    if (dataLines.length === 0) {
       throw notFound(
         `NDBC station ${stationId} has no oceanographic data rows — station may be offline.`,
         { stationId, reason: 'no_ocean_data' },
+      );
+    }
+
+    // The latest observation is keyed by the newest row whose five time columns form a real
+    // date; a row that fails that is skipped rather than fatal (mirrors parseAdcpText).
+    const latest = findLatestTimestampedRow(dataLines);
+    if (!latest) {
+      throw serviceUnavailable(
+        `NDBC ocean file for ${stationId} carries no row with a valid observation timestamp — every row's time columns are malformed upstream.`,
+        { stationId },
       );
     }
 
@@ -257,15 +399,14 @@ export class NdbcService {
       return Number.isNaN(n) ? null : n;
     };
 
-    // Rows are reverse-chronological, so the first data row is the latest observation. Its five
-    // time columns key that observation; collect every row sharing them, since a station reporting
-    // multiple depths emits one row per depth at the same timestamp. Older observations sort after,
-    // so stopping at the first differing timestamp captures exactly the latest observation.
-    const firstTokens = firstDataLine.split(/\s+/);
-    const timeKey = firstTokens.slice(0, 5).join(' ');
+    // The latest row's five time columns key the observation; collect every row sharing them,
+    // since a station reporting multiple depths emits one row per depth at the same timestamp.
+    // Older observations sort after, so stopping at the first differing timestamp captures
+    // exactly the latest observation.
+    const timeKey = latest.values.slice(0, 5).join(' ');
 
     const readings: NdbcOceanReading[] = [];
-    for (const line of dataLines) {
+    for (const line of dataLines.slice(latest.index)) {
       const tokens = line.split(/\s+/);
       if (tokens.slice(0, 5).join(' ') !== timeKey) break;
 
@@ -296,19 +437,7 @@ export class NdbcService {
       );
     }
 
-    // Build the ISO timestamp from the YY MM DD hh mm columns. NDBC emits 4-digit years in
-    // the YY column, so treat values ≥ 1000 as already-full years (mirrors parseAdcpText).
-    const [yy, mo, dd, hh, mn] = firstTokens;
-    const observedAt =
-      yy && mo && dd && hh && mn
-        ? (() => {
-            const n = Number.parseInt(yy, 10);
-            const year = n >= 1000 ? n : n < 50 ? 2000 + n : 1900 + n;
-            return `${year}-${mo.padStart(2, '0')}-${dd.padStart(2, '0')}T${hh.padStart(2, '0')}:${mn.padStart(2, '0')}:00Z`;
-          })()
-        : new Date().toISOString();
-
-    return { observedAt, readings };
+    return { observedAt: latest.time.iso, readings };
   }
 
   /** Parse NDBC active stations XML into NdbcStation array. */
@@ -322,13 +451,20 @@ export class NdbcService {
       matchResult !== null;
       matchResult = stationRegex.exec(xml)
     ) {
-      const attrs = matchResult[1] ?? '';
-      const get = (name: string): string | undefined => {
-        const m = new RegExp(`${name}="([^"]*)"`, 'i').exec(attrs);
-        return m ? m[1] : undefined;
-      };
+      // Lift every attribute in one pass, decoding each value as it is read, so a value the
+      // parser starts reading later is covered by construction rather than by an enumerated
+      // field list. Keys are lowercased because the feed's casing is not guaranteed.
+      const attrs = new Map<string, string>();
+      for (const [, name, value] of (matchResult[1] ?? '').matchAll(ATTRIBUTE_REGEX)) {
+        if (name !== undefined && value !== undefined) {
+          attrs.set(name.toLowerCase(), decodeXmlEntities(value));
+        }
+      }
+      const get = (name: string): string | undefined => attrs.get(name);
+      /** NDBC writes its capability flags as `y`/`n`, with `1` seen in older rows. */
+      const flag = (name: string): boolean => get(name) === 'y' || get(name) === '1';
 
-      const id = get('ID') ?? get('id');
+      const id = get('id');
       const lat = get('lat');
       const lon = get('lon');
       const name = get('name');
@@ -350,8 +486,9 @@ export class NdbcService {
         lon: lonNum,
         ...(stationType !== undefined && { type: stationType }),
         ...(stationOwner !== undefined && { owner: stationOwner }),
-        hasMet: get('met') === 'y' || get('met') === '1',
-        hasCurrents: get('currents') === 'y' || get('currents') === '1',
+        hasMet: flag('met'),
+        hasCurrents: flag('currents'),
+        hasWaterQuality: flag('waterquality'),
       });
     }
 
@@ -364,6 +501,15 @@ export class NdbcService {
    * Line 2: units row (ignored)
    * Lines 3+: data rows most recent first
    * MM = missing sensor value → null
+   *
+   * `observedAt` is the newest data row's timestamp. Sensor values are resolved per column
+   * block (COLUMN_GROUPS) from the most recent row inside GROUP_LOOKBACK_MS that carries
+   * that block, because NDBC writes each block on its own processing cycle — reading the
+   * newest row alone drops a wave sample the file is already carrying a few rows down. The
+   * wave block reports the row it came from as `wavesObservedAt`, which can be older than
+   * `observedAt`, and every block that resolved from an older row is listed in `staleGroups`.
+   * The scan is reverse-chronological and stops at the first row past the window, so a
+   * multi-thousand-row file is never walked end to end.
    */
   parseRealtimeText(text: string, stationId: string): NdbcObservation {
     const lines = text
@@ -382,76 +528,123 @@ export class NdbcService {
       .split(/\s+/)
       .map((c) => c.toUpperCase());
 
-    // Find first data row (not starting with #)
-    const dataLine = lines.find((l) => !l.startsWith('#'));
-    if (!dataLine) {
+    const dataLines = lines.filter((l) => !l.startsWith('#'));
+    if (dataLines.length === 0) {
       throw notFound(`NDBC buoy ${stationId} has no data rows — buoy may be offline.`, {
         stationId,
         reason: 'no_sensor_data',
       });
     }
 
-    const values = dataLine.split(/\s+/);
-
-    const get = (col: string): string | null => {
-      const idx = columns.indexOf(col);
+    // NDBC's header writes lowercase `mm` for minutes; after uppercasing, 'MM' names both
+    // the month column and the minute column, so minutes resolve through lastIndexOf.
+    const minuteIdx = columns.lastIndexOf('MM');
+    const cell = (values: string[], idx: number): string | null => {
       if (idx < 0 || idx >= values.length) return null;
       const v = values[idx];
       return v === 'MM' || v === undefined ? null : v;
     };
+    const column = (values: string[], col: string): string | null =>
+      cell(values, columns.indexOf(col));
+    const rowTimeOf = (values: string[]): NdbcRowTime | null =>
+      parseRowTime(
+        column(values, 'YY'),
+        column(values, 'MM'),
+        column(values, 'DD'),
+        column(values, 'HH'),
+        cell(values, minuteIdx),
+      );
 
-    const toNum = (col: string): number | null => {
-      const v = get(col);
-      if (v === null) return null;
-      const n = Number.parseFloat(v);
+    // Rows are reverse-chronological. The newest row whose time columns form a real date
+    // anchors the observation; rows above it are malformed upstream and are skipped rather
+    // than timestamped with the current time.
+    let newest: { index: number; time: NdbcRowTime; values: string[] } | undefined;
+    for (const [index, line] of dataLines.entries()) {
+      const values = line.split(/\s+/);
+      const time = rowTimeOf(values);
+      if (time) {
+        newest = { index, time, values };
+        break;
+      }
+    }
+    if (!newest) {
+      throw serviceUnavailable(
+        `NDBC realtime file for ${stationId} carries no row with a valid observation timestamp — every row's time columns are malformed upstream.`,
+        { stationId },
+      );
+    }
+
+    const windowStart = newest.time.epochMs - GROUP_LOOKBACK_MS;
+    const resolved = new Map<NdbcColumnGroup, { time: NdbcRowTime; values: string[] }>();
+    const pending = new Set(Object.keys(COLUMN_GROUPS) as NdbcColumnGroup[]);
+
+    for (const [index, line] of dataLines.entries()) {
+      if (index < newest.index) continue;
+      if (pending.size === 0) break;
+      const values = index === newest.index ? newest.values : line.split(/\s+/);
+      const time = index === newest.index ? newest.time : rowTimeOf(values);
+      // A malformed row is skipped, never fatal and never a stop — ending the scan on one
+      // would hide every older row behind it.
+      if (!time) continue;
+      if (time.epochMs < windowStart) break;
+      for (const group of [...pending]) {
+        if (COLUMN_GROUPS[group].some((col) => column(values, col) !== null)) {
+          resolved.set(group, { time, values });
+          pending.delete(group);
+        }
+      }
+    }
+
+    // Every block that came from an older row, so a caller is never left reading a value as
+    // though it were measured at observedAt. Sorted by block name to keep the list stable.
+    const staleGroups: NdbcStaleGroup[] = [...resolved]
+      .filter(([, row]) => row.time.epochMs < newest.time.epochMs)
+      .map(([group, row]) => ({ group, observedAt: row.time.iso }))
+      .sort((a, b) => a.group.localeCompare(b.group));
+
+    const toNum = (group: NdbcColumnGroup, col: string): number | null => {
+      const row = resolved.get(group);
+      if (!row) return null;
+      const raw = column(row.values, col);
+      if (raw === null) return null;
+      const n = Number.parseFloat(raw);
       return Number.isNaN(n) ? null : n;
     };
 
-    // Build ISO timestamp from YY MM DD hh mm columns.
-    // NOTE: NDBC header uses lowercase 'mm' for minutes; after uppercasing, the
-    // columns array has 'MM' at index 1 (month) AND at index 4 (minute).
-    // indexOf returns the first match (month), so we use lastIndexOf for minutes.
-    const getMinute = (): string | null => {
-      const idx = columns.lastIndexOf('MM');
-      if (idx < 0 || idx >= values.length) return null;
-      const v = values[idx];
-      return v === 'MM' || v === undefined ? null : v;
+    const observation: NdbcObservation = {
+      observedAt: newest.time.iso,
+      staleGroups,
+      wavesObservedAt: resolved.get('wave')?.time.iso ?? null,
+      windDirectionDeg: toNum('wind', 'WDIR'),
+      windSpeedMs: toNum('wind', 'WSPD'),
+      gustSpeedMs: toNum('wind', 'GST'),
+      waveHeightM: toNum('wave', 'WVHT'),
+      dominantPeriodSec: toNum('wave', 'DPD'),
+      averagePeriodSec: toNum('wave', 'APD'),
+      meanWaveDirectionDeg: toNum('wave', 'MWD'),
+      pressureHpa: toNum('atmosphere', 'PRES'),
+      airTempC: toNum('atmosphere', 'ATMP'),
+      waterTempC: toNum('water', 'WTMP'),
+      dewPointC: toNum('atmosphere', 'DEWP'),
+      visibilityNmi: toNum('visibility', 'VIS'),
+      tideFt: toNum('tide', 'TIDE'),
     };
 
-    const yy = get('YY') ?? get('#YY');
-    const mo = get('MM');
-    const dd = get('DD');
-    const hh = get('HH');
-    const mn = getMinute();
-
-    // NDBC emits 4-digit years in the YY column despite the column name suggesting otherwise.
-    // Treat values ≥ 1000 as already-full years; add 2000 only for genuine 2-digit values.
-    const year = yy
-      ? (() => {
-          const n = Number.parseInt(yy, 10);
-          return n >= 1000 ? n : n < 50 ? 2000 + n : 1900 + n;
-        })()
-      : new Date().getFullYear();
-    const observedAt =
-      yy && mo && dd && hh && mn
-        ? `${year}-${mo.padStart(2, '0')}-${dd.padStart(2, '0')}T${hh.padStart(2, '0')}:${mn.padStart(2, '0')}:00Z`
-        : new Date().toISOString();
-
-    // Check if all sensor fields are MM
-    const sensorCols = [
-      'WDIR',
-      'WSPD',
-      'GST',
-      'WVHT',
-      'DPD',
-      'APD',
-      'MWD',
-      'PRES',
-      'ATMP',
-      'WTMP',
-      'DEWP',
-    ];
-    const allMissing = sensorCols.every((col) => get(col) === null);
+    // The all-missing check spans the same window the values were resolved over, so a buoy
+    // that reported ten minutes ago is not reported offline because its newest row is bare.
+    const allMissing = [
+      observation.windDirectionDeg,
+      observation.windSpeedMs,
+      observation.gustSpeedMs,
+      observation.waveHeightM,
+      observation.dominantPeriodSec,
+      observation.averagePeriodSec,
+      observation.meanWaveDirectionDeg,
+      observation.pressureHpa,
+      observation.airTempC,
+      observation.waterTempC,
+      observation.dewPointC,
+    ].every((v) => v === null);
     if (allMissing) {
       throw notFound(
         `NDBC buoy ${stationId} has all sensor fields missing — buoy offline or sensor failure.`,
@@ -459,22 +652,7 @@ export class NdbcService {
       );
     }
 
-    return {
-      observedAt,
-      windDirectionDeg: toNum('WDIR'),
-      windSpeedMs: toNum('WSPD'),
-      gustSpeedMs: toNum('GST'),
-      waveHeightM: toNum('WVHT'),
-      dominantPeriodSec: toNum('DPD'),
-      averagePeriodSec: toNum('APD'),
-      meanWaveDirectionDeg: toNum('MWD'),
-      pressureHpa: toNum('PRES'),
-      airTempC: toNum('ATMP'),
-      waterTempC: toNum('WTMP'),
-      dewPointC: toNum('DEWP'),
-      visibilityNmi: toNum('VIS'),
-      tideFt: toNum('TIDE'),
-    };
+    return observation;
   }
 }
 

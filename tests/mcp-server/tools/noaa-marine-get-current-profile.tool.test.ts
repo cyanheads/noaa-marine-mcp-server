@@ -16,6 +16,7 @@ const NDBC_STATION = {
   lon: -68.11,
   hasMet: false,
   hasCurrents: true,
+  hasWaterQuality: false,
   type: 'buoy',
 };
 
