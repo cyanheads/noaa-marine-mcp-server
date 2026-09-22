@@ -7,12 +7,14 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import {
   createFetchMock,
   createMockContext,
+  type FetchMockHarness,
   runToolContract,
 } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { noaaMarineFindStations } from '@/mcp-server/tools/definitions/noaa-marine-find-stations.tool.js';
-import { initCoopsService } from '@/services/coops/coops-service.js';
-import { initNdbcService } from '@/services/ndbc/ndbc-service.js';
+import { getCoopsService, initCoopsService } from '@/services/coops/coops-service.js';
+import { getNdbcService, initNdbcService } from '@/services/ndbc/ndbc-service.js';
+import { callsTo, installCoopsFake, stateCatalogCoops } from '../../support/coops-http.js';
 
 // Minimal CO-OPS station fixture
 const COOPS_TIDE_STATION = {
@@ -79,13 +81,16 @@ const COOPS_SEATTLE_NAMED = {
   type: 'R',
 };
 
-/** A CO-OPS current station — alphanumeric ID, no NDBC mirror, so an ID query has only this row to find. */
+/**
+ * A CO-OPS current station — alphanumeric ID, no NDBC mirror, so an ID query has only this row
+ * to find. `currentpredictions` rows carry a null state, as CO-OPS publishes them.
+ */
 const COOPS_CURRENT_STATION = {
   id: 'ACT4176',
   name: 'Bowlers Wharf, Rappahannock River',
   lat: 37.8,
   lng: -76.7,
-  state: 'VA',
+  state: null,
   type: 'H',
 };
 
@@ -843,11 +848,57 @@ describe('noaaMarineFindStations', () => {
 
     expect(structured.truncated).toBe(true);
     expect(structured.total_found).toBe(2);
-    // Both notices survive in one composed string — ctx.enrich.truncated() writes `notice`
+    // Both notices survive in one composed string — ctx.enrich.notice() writes `notice`
     // last-wins, so an uncomposed second source would silently erase the first.
-    expect(structured.notice).toContain('Showing 1 of 2 matches');
+    expect(structured.notice).toMatch(/^Showing 1 of 2 matches/);
     expect(structured.notice).toContain('coops');
     expect(structured.sources).toMatchObject({ answered: ['ndbc'], failed: ['coops'] });
+    // The cap is disclosed by `truncated`, `stations.length`, `total_found` and the notice —
+    // no undeclared shown/cap/ceiling keys, and no stray trailer line for `truncated`.
+    expect(structured).not.toHaveProperty('shown');
+    expect(structured).not.toHaveProperty('cap');
+    expect(structured).not.toHaveProperty('truncationCeiling');
+    const text = result.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
+    expect(text).toContain('(showing 1 — results truncated, increase limit or narrow filters)');
+    expect(text).toContain('Showing 1 of 2 matches');
+    expect(text).not.toContain('**truncated:**');
+  });
+
+  it('discloses a capped list with the cap notice alone when every catalog answered', async () => {
+    await mockCatalog({}, [NDBC_BUOY, NDBC_CURRENTS_ONLY, NDBC_WATER_QUALITY_ONLY]);
+
+    const result = await runToolContract(noaaMarineFindStations, { source: 'ndbc', limit: 2 });
+    const structured = result.structuredContent as Record<string, unknown>;
+
+    expect(structured.truncated).toBe(true);
+    expect(structured.stations).toHaveLength(2);
+    expect(structured.notice).toBe(
+      'Showing 2 of 3 matches — raise limit (max 200) or narrow the filters to reach the rest.',
+    );
+    expect(structured).not.toHaveProperty('sources');
+    expect(structured).not.toHaveProperty('applied_search');
+    const text = result.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
+    expect(text).not.toContain('**truncated:**');
+  });
+
+  it('leaves a list exactly at the limit uncapped, with no notice', async () => {
+    await mockCatalog({}, [NDBC_BUOY, NDBC_CURRENTS_ONLY]);
+
+    const result = await runToolContract(noaaMarineFindStations, { source: 'ndbc', limit: 2 });
+    const structured = result.structuredContent as Record<string, unknown>;
+
+    expect(structured.total_found).toBe(2);
+    expect(structured).not.toHaveProperty('truncated');
+    expect(structured).not.toHaveProperty('notice');
+  });
+
+  it('declares only applied_search, notice, and sources as enrichment, with truncated on output', () => {
+    expect(Object.keys(noaaMarineFindStations.enrichment ?? {}).sort()).toEqual([
+      'applied_search',
+      'notice',
+      'sources',
+    ]);
+    expect(Object.keys(noaaMarineFindStations.output.shape)).toContain('truncated');
   });
 
   // --- #21: a rejected fan-out leg is visible, and never reads as an empty search ---
@@ -1208,5 +1259,160 @@ describe('noaaMarineFindStations', () => {
     } finally {
       http.restore();
     }
+  });
+});
+
+// --- #36: a station whose rows carry no state code takes the nearest state-bearing row's state ---
+
+describe('noaaMarineFindStations state resolution through the CO-OPS service', () => {
+  let http: FetchMockHarness;
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    initCoopsService(null as any, null as any, { applicationId: 'test' });
+    initNdbcService();
+    vi.spyOn(getNdbcService(), 'getActiveStations').mockResolvedValue([NDBC_BUOY]);
+    http = installCoopsFake(stateCatalogCoops);
+  });
+
+  afterEach(() => {
+    http.restore();
+    vi.useRealTimers();
+  });
+
+  interface Row {
+    bins?: unknown[];
+    source: string;
+    state?: string;
+    state_derived?: boolean;
+    station_id: string;
+  }
+
+  async function search(input: Parameters<typeof runToolContract>[1]) {
+    const result = await runToolContract(noaaMarineFindStations, input);
+    expect(result.isError).toBeFalsy();
+    const structured = result.structuredContent as { stations: Row[]; total_found: number };
+    const text = result.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
+    return { structured, text };
+  }
+
+  it('keeps a published state and marks nothing derived (9447130 → WA)', async () => {
+    const { structured, text } = await search({ query: '9447130', source: 'coops' });
+
+    expect(structured.stations).toHaveLength(1);
+    expect(structured.stations[0]).toMatchObject({ station_id: '9447130', state: 'WA' });
+    expect(structured.stations[0]).not.toHaveProperty('state_derived');
+    expect(text).toContain('· WA');
+    expect(text).not.toContain('derived');
+  });
+
+  it('still excludes NDBC under a state filter and never reads the NDBC catalog', async () => {
+    const { structured } = await search({ state: 'WA' });
+
+    expect(structured.stations.length).toBeGreaterThan(0);
+    expect(structured.stations.every((s) => s.source === 'coops')).toBe(true);
+    expect(getNdbcService().getActiveStations).not.toHaveBeenCalled();
+  });
+
+  it('returns Washington current stations for { state: "WA", types: ["current"] }', async () => {
+    const { structured, text } = await search({ state: 'WA', types: ['current'] });
+
+    expect(structured.stations.map((s) => s.station_id)).toEqual(['PUG1515']);
+    const row = structured.stations[0]!;
+    expect(row.state).toBe('WA');
+    expect(row.state_derived).toBe(true);
+    // The derived state rides the collapsed row, which still carries every bin.
+    expect(row.bins).toHaveLength(3);
+    expect(text).toContain('### West Point, West of (PUG1515)');
+    expect(text).toContain('· WA (derived from the nearest state-bearing station)');
+  });
+
+  it('gives a stateless tide row within 25 km the nearest state (TWC1165 → WA)', async () => {
+    const { structured, text } = await search({ query: 'TWC1165' });
+
+    expect(structured.stations[0]).toMatchObject({
+      station_id: 'TWC1165',
+      state: 'WA',
+      state_derived: true,
+    });
+    expect(text).toContain('· WA (derived');
+  });
+
+  it('includes derived and published rows together under one state filter', async () => {
+    const { structured } = await search({ state: 'WA', limit: 50 });
+
+    const byId = Object.fromEntries(structured.stations.map((s) => [s.station_id, s]));
+    expect(Object.keys(byId).sort()).toEqual(['9447130', '9449880', 'PUG1515', 'TWC1165']);
+    expect(byId['9447130']).not.toHaveProperty('state_derived');
+    expect(byId['9449880']).not.toHaveProperty('state_derived');
+    expect(byId.PUG1515!.state_derived).toBe(true);
+    expect(byId.TWC1165!.state_derived).toBe(true);
+  });
+
+  it('leaves PCT0016 without a state, and no state filter returns it', async () => {
+    const { structured, text } = await search({ query: 'PCT0016' });
+
+    expect(structured.stations).toHaveLength(1);
+    expect(structured.stations[0]).not.toHaveProperty('state');
+    expect(structured.stations[0]).not.toHaveProperty('state_derived');
+    expect(text).not.toContain('derived');
+
+    for (const code of noaaMarineFindStations.input.shape.state.unwrap().options) {
+      const scoped = await search({ query: 'PCT0016', state: code });
+      expect(scoped.structured.total_found, code).toBe(0);
+    }
+  });
+
+  it('never reports a country-name catalog value as a state (1619910, Midway)', async () => {
+    const { structured, text } = await search({ query: '1619910' });
+
+    expect(structured.stations[0]).not.toHaveProperty('state');
+    expect(text).not.toContain('United States of America');
+  });
+
+  it('shows a station its own non-code value (1840000 → FM), and no state filter returns it', async () => {
+    const { structured, text } = await search({ query: '1840000' });
+
+    expect(structured.stations).toHaveLength(1);
+    expect(structured.stations[0]).toMatchObject({ station_id: '1840000', state: 'FM' });
+    expect(structured.stations[0]).not.toHaveProperty('state_derived');
+    expect(text).toContain('### CHUUK, Moen Island (1840000)');
+    expect(text).toContain('· FM');
+    expect(text).not.toContain('derived');
+
+    for (const code of noaaMarineFindStations.input.shape.state.unwrap().options) {
+      const scoped = await search({ state: code, limit: 200 });
+      expect(
+        scoped.structured.stations.map((s) => s.station_id),
+        code,
+      ).not.toContain('1840000');
+    }
+  });
+
+  it('resolves the states once per catalog refresh, not per search', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-09-22T00:00:00Z'));
+    const resolve = vi.spyOn(getCoopsService(), 'stationStates');
+
+    await search({ state: 'WA' });
+    await search({ query: 'PUG1515' });
+    await search({ state: 'WA', types: ['current'] });
+
+    // Three catalog fetches — one per list — and one resolved map, reused by every search.
+    expect(callsTo(http, 'catalog')).toHaveLength(3);
+    const first = resolve.mock.results[0]!.value;
+    expect(resolve.mock.results).toHaveLength(3);
+    expect(resolve.mock.results[1]!.value).toBe(first);
+    expect(resolve.mock.results[2]!.value).toBe(first);
+
+    // Past the six-hour catalog TTL the lists refetch, and the states are resolved afresh.
+    vi.setSystemTime(new Date('2026-09-22T06:00:01Z'));
+    await search({ state: 'WA' });
+
+    expect(callsTo(http, 'catalog')).toHaveLength(6);
+    const refreshed = resolve.mock.results[3]!.value;
+    expect(refreshed).not.toBe(first);
+    expect(refreshed).toEqual(first);
   });
 });

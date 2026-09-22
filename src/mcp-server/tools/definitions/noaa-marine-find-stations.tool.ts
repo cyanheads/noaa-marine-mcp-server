@@ -7,77 +7,9 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getCoopsService, isCoopsThrottled } from '@/services/coops/coops-service.js';
 import { currentPredictionClass, tidePredictionClass } from '@/services/coops/prediction-class.js';
+import { STATE_CODES } from '@/services/coops/station-state.js';
+import { haversineKm } from '@/services/geo.js';
 import { getNdbcService } from '@/services/ndbc/ndbc-service.js';
-
-/** Haversine distance in km between two lat/lon pairs. */
-function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
-  const R = 6371;
-  const dLat = ((lat2 - lat1) * Math.PI) / 180;
-  const dLon = ((lon2 - lon1) * Math.PI) / 180;
-  const a =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos((lat1 * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180) * Math.sin(dLon / 2) ** 2;
-  return R * 2 * Math.asin(Math.sqrt(a));
-}
-
-const STATE_CODES = [
-  'AL',
-  'AK',
-  'AZ',
-  'AR',
-  'CA',
-  'CO',
-  'CT',
-  'DE',
-  'FL',
-  'GA',
-  'HI',
-  'ID',
-  'IL',
-  'IN',
-  'IA',
-  'KS',
-  'KY',
-  'LA',
-  'ME',
-  'MD',
-  'MA',
-  'MI',
-  'MN',
-  'MS',
-  'MO',
-  'MT',
-  'NE',
-  'NV',
-  'NH',
-  'NJ',
-  'NM',
-  'NY',
-  'NC',
-  'ND',
-  'OH',
-  'OK',
-  'OR',
-  'PA',
-  'RI',
-  'SC',
-  'SD',
-  'TN',
-  'TX',
-  'UT',
-  'VT',
-  'VA',
-  'WA',
-  'WV',
-  'WI',
-  'WY',
-  'DC',
-  'PR',
-  'VI',
-  'GU',
-  'AS',
-  'MP',
-] as const;
 
 /** Filter values only a CO-OPS row can carry. */
 const COOPS_FILTER_VALUES: readonly string[] = ['tide', 'current', 'water_level'];
@@ -154,7 +86,9 @@ const AppliedSearchSchema = z.object({
   state: z
     .string()
     .optional()
-    .describe('The state filter applied. Restricts results to CO-OPS and excludes NDBC.'),
+    .describe(
+      "The state filter applied, matched against each station's resolved state: its own catalog code, or for a station publishing none the state of the nearest state-bearing CO-OPS tide or water-level station within 25 km. Restricts results to CO-OPS and excludes NDBC.",
+    ),
   types: z
     .array(z.string().describe('A requested capability or platform filter value.'))
     .optional()
@@ -294,6 +228,7 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
       .describe(
         'Filter by 2-letter US state or territory code. Applies to CO-OPS stations only — ' +
           'providing it restricts results to CO-OPS and excludes NDBC buoys (which carry no state). ' +
+          'A station matches on its own catalog code, or — when its catalog rows carry none, as with every current station — on the state of the nearest state-bearing CO-OPS tide or water-level station within 25 km, which can be wrong on waters shared across a state or national border. ' +
           'E.g. "WA", "CA", "PR".',
       ),
     source: z
@@ -381,7 +316,15 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
             state: z
               .string()
               .optional()
-              .describe('US state or territory code (CO-OPS stations only).'),
+              .describe(
+                "US state or territory code (CO-OPS stations only): the station's own catalog code, or — when its catalog rows carry none, as with every current station — the state of the nearest state-bearing CO-OPS tide or water-level station within 25 km, marked by state_derived. A derived state can be wrong on waters shared across a state or national border. When neither applies, the station's own non-code catalog value (e.g. FM) is shown as published and unmarked — no state filter returns such a station, since the filter takes codes only. Omitted when the station publishes nothing at all and no state-bearing station is that close.",
+              ),
+            state_derived: z
+              .boolean()
+              .optional()
+              .describe(
+                "True when state was derived from the nearest state-bearing CO-OPS tide or water-level station within 25 km, because the station's own catalog rows carry no state code. Omitted when state is the station's own.",
+              ),
             capabilities: z
               .array(z.string().describe('Capability identifier, e.g. "tide", "water_level".'))
               .describe(
@@ -496,6 +439,7 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
       reference_id?: string;
       source: 'coops' | 'ndbc';
       state?: string;
+      state_derived?: boolean;
       station_id: string;
       type?: string;
     }
@@ -609,6 +553,11 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
     // Process CO-OPS stations
     if (coopsResults.status === 'fulfilled' && coopsResults.value) {
       const [tideStations, currentStations, waterLevelStations] = coopsResults.value;
+      const states = coopsSvc.stationStates({
+        tide: tideStations,
+        current: currentStations,
+        waterLevel: waterLevelStations,
+      });
 
       // Build unique station map — a station can appear in multiple lists, and each list
       // it appears in IS one of its capabilities, so membership needs no separate index.
@@ -645,7 +594,8 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
 
       for (const s of allCoops.values()) {
         if (!matchesTypeFilter(s.capabilities)) continue;
-        if (input.state && s.state !== input.state) continue;
+        const resolved = states.get(s.id);
+        if (input.state && resolved?.state !== input.state) continue;
         if (!matchesQuery(s.name, s.id)) continue;
 
         const entry: StationResult = {
@@ -658,7 +608,10 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
         };
         const coopsType = primaryTypeFor(s.capabilities);
         if (coopsType) entry.type = coopsType;
-        if (s.state) entry.state = s.state;
+        if (resolved) {
+          entry.state = resolved.state;
+          if (resolved.derived) entry.state_derived = true;
+        }
 
         const tideRow = tideRowById.get(s.id);
         const predictionClass = tidePredictionClass(tideRow?.type);
@@ -741,7 +694,7 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
     const truncated = stations.length < total_found;
 
     // One notice reaches the caller, so every source of guidance composes into it —
-    // ctx.enrich.truncated() writes `notice` last-wins and would otherwise erase the rest.
+    // ctx.enrich.notice() writes `notice` last-wins and would otherwise erase the rest.
     const notices: string[] = [];
 
     if (failed.length > 0) {
@@ -774,19 +727,14 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
       notices.push(describeEmptySearch(applied));
     }
 
+    // The cap itself is on output as `truncated`, beside `stations.length` and `total_found`;
+    // the notice carries the guidance for reaching the rest.
     if (truncated) {
-      ctx.enrich.truncated({
-        shown: stations.length,
-        cap: input.limit,
-        ceiling: total_found,
-        guidance: [
-          `Showing ${stations.length} of ${total_found} matches — raise limit (max 200) or narrow the filters to reach the rest.`,
-          ...notices,
-        ].join(' '),
-      });
-    } else if (notices.length > 0) {
-      ctx.enrich.notice(notices.join(' '));
+      notices.unshift(
+        `Showing ${stations.length} of ${total_found} matches — raise limit (max 200) or narrow the filters to reach the rest.`,
+      );
     }
+    if (notices.length > 0) ctx.enrich.notice(notices.join(' '));
 
     ctx.log.info('Station search complete', {
       total_found,
@@ -809,7 +757,9 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
     const lines: string[] = [header];
     for (const s of result.stations) {
       const dist = s.distance_km !== undefined ? ` · ${s.distance_km} km` : '';
-      const state = s.state ? ` · ${s.state}` : '';
+      const state = s.state
+        ? ` · ${s.state}${s.state_derived ? ' (derived from the nearest state-bearing station)' : ''}`
+        : '';
       const typeStr = s.type ? ` · **Type:** ${s.type}` : '';
       const platformStr = s.platform ? ` · **Platform:** ${s.platform}` : '';
       const classStr = s.prediction_class ? ` · **Prediction class:** ${s.prediction_class}` : '';
