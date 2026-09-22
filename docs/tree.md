@@ -1,6 +1,6 @@
 # noaa-marine-mcp-server - Directory Structure
 
-Generated on: 2026-09-17 19:57:58
+Generated on: 2026-09-22 22:19:31
 
 ```text
 noaa-marine-mcp-server/
@@ -171,6 +171,8 @@ noaa-marine-mcp-server/
 │   │   ├── resources/
 │   │   │   └── noaa-marine-station.resource.test.ts
 │   │   └── tools/
+│   │       ├── coops-date-forms.test.ts
+│   │       ├── coops-throttle.test.ts
 │   │       ├── noaa-marine-find-stations.tool.test.ts
 │   │       ├── noaa-marine-get-conditions.tool.test.ts
 │   │       ├── noaa-marine-get-current-profile.tool.test.ts
@@ -187,6 +189,8 @@ noaa-marine-mcp-server/
 │   │   │   └── row-page.test.ts
 │   │   └── ndbc/
 │   │       └── ndbc-service.test.ts
+│   ├── support/
+│   │   └── coops-http.ts
 │   └── tools/
 ├── .dockerignore
 ├── .env.example

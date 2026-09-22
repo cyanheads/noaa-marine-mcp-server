@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.5.1](changelog/0.5.x/0.5.1.md) — 2026-09-22
+
+CO-OPS throttling as a typed error, residual sign clamp, hyphenated dates
+
 ## [0.5.0](changelog/0.5.x/0.5.0.md) — 2026-09-17 · ⚠️ Breaking
 
 Paged CO-OPS series, coarser water levels, datum and class fixes
