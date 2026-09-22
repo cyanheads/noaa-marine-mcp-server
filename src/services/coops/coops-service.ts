@@ -14,6 +14,7 @@ import {
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import { fetchWithTimeout, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import type { ServerConfig } from '@/config/server-config.js';
+import { type CoopsCatalogs, resolveStationStates, type StationState } from './station-state.js';
 import type {
   CoopsCurrent6MinRow,
   CoopsCurrentRow,
@@ -254,6 +255,8 @@ interface CacheEntry {
 export class CoopsService {
   private readonly applicationId: string;
   private readonly stationCache = new Map<CoopsStationType, CacheEntry>();
+  /** The resolved states, and the three catalog lists they were resolved from. */
+  private resolvedStates?: { catalogs: CoopsCatalogs; states: ReadonlyMap<string, StationState> };
 
   // AppConfig and StorageService accepted for init-pattern consistency; not used at runtime
   constructor(_config: AppConfig, _storage: StorageService, serverConfig: ServerConfig) {
@@ -292,6 +295,25 @@ export class CoopsService {
     this.stationCache.set(type, { stations, fetchedAt: Date.now() });
     ctx.log.debug('CO-OPS station list cached', { type, count: stations.length });
     return stations;
+  }
+
+  /**
+   * Station ID → resolved state for the three catalog lists `getStations` returned. The lists are
+   * the cached arrays themselves, so the same lists mean the same catalogs: the resolution is
+   * reused until one of them is refetched, and recomputed once when it is.
+   */
+  stationStates(catalogs: CoopsCatalogs): ReadonlyMap<string, StationState> {
+    const cached = this.resolvedStates;
+    if (
+      cached?.catalogs.tide === catalogs.tide &&
+      cached.catalogs.current === catalogs.current &&
+      cached.catalogs.waterLevel === catalogs.waterLevel
+    ) {
+      return cached.states;
+    }
+    const states = resolveStationStates(catalogs);
+    this.resolvedStates = { catalogs, states };
+    return states;
   }
 
   /**

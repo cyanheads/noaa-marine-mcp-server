@@ -46,6 +46,114 @@ export function callsTo(http: FetchMockHarness, endpoint: CoopsEndpoint): URL[] 
     .map((call) => new URL(call.request.url));
 }
 
+/** PUG1515's three depth bins — a current-only station, so its catalog rows carry no state. */
+const PUG1515_BINS = [
+  { currbin: 15, depth: 16 },
+  { currbin: 10, depth: 49 },
+  { currbin: 1, depth: 108 },
+].map((bin) => ({
+  id: 'PUG1515',
+  name: 'West Point, West of',
+  lat: 47.6621,
+  lng: -122.4417,
+  state: null,
+  depthType: 'B',
+  type: 'H',
+  ...bin,
+}));
+
+/**
+ * The station catalogs as CO-OPS publishes their state field, for tests of how a station's
+ * state is resolved:
+ *
+ * - `9447130` publishes WA on its tide and water-level rows.
+ * - `PUG1515` is current-only, 10 km from `9447130`, so its state is derived.
+ * - `TWC1165` is a tide row with a blank state, 17 km from `9449880` (WA).
+ * - `PCT0016` is current-only in Mexican waters, with no state-bearing row within 25 km.
+ * - `1619910` (Midway) has a blank tide row first and a country name, not a code, on its
+ *   water-level row — so it showed no state before derivation existed, and shows none now.
+ * - `1840000` (Chuuk) publishes `FM`, a code outside the state filter's set, with no
+ *   state-bearing row within 25 km — its own value is shown as published.
+ */
+export const STATE_CATALOGS = {
+  tidepredictions: [
+    {
+      id: '1840000',
+      name: 'CHUUK, Moen Island',
+      lat: 7.4467,
+      lng: 151.8467,
+      state: 'FM',
+      type: 'R',
+      reference_id: '',
+    },
+    {
+      id: '1619910',
+      name: 'SAND ISLAND, MIDWAY ISLANDS',
+      lat: 28.2117,
+      lng: -177.36,
+      state: '',
+      type: 'R',
+      reference_id: '',
+    },
+    {
+      id: '9447130',
+      name: 'SEATTLE (Madison St.), Elliott Bay',
+      lat: 47.6026,
+      lng: -122.3393,
+      state: 'WA',
+      type: 'R',
+      reference_id: '',
+    },
+    {
+      id: 'TWC1165',
+      name: 'Peavine Pass',
+      lat: 48.6,
+      lng: -122.8,
+      state: '',
+      type: 'S',
+      reference_id: '9444900',
+    },
+    {
+      id: '9449880',
+      name: 'Friday Harbor',
+      lat: 48.5453,
+      lng: -123.0125,
+      state: 'WA',
+      type: 'R',
+      reference_id: '',
+    },
+  ],
+  currentpredictions: [
+    ...PUG1515_BINS,
+    {
+      id: 'PCT0016',
+      name: 'Magdalena Bay entrance',
+      lat: 24.5333,
+      lng: -112.0333,
+      state: null,
+      currbin: 1,
+      type: 'S',
+    },
+  ],
+  waterlevels: [
+    { id: '9447130', name: 'Seattle', lat: 47.6026, lng: -122.3393, state: 'WA' },
+    {
+      id: '1619910',
+      name: 'Sand Island, Midway Islands',
+      lat: 28.2117,
+      lng: -177.36,
+      state: 'United States of America',
+    },
+  ],
+} as const;
+
+/** Answers the station catalog from {@link STATE_CATALOGS}. The data endpoint is never reached. */
+export function stateCatalogCoops(endpoint: CoopsEndpoint, url: URL): Response {
+  if (endpoint !== 'catalog') throw new Error(`Unexpected CO-OPS ${endpoint} request: ${url}`);
+  const type = url.searchParams.get('type') as keyof typeof STATE_CATALOGS;
+  return Response.json({ stations: STATE_CATALOGS[type] });
+}
+
 /** Healthy answers for the three data tools, one station of each kind. */
 export function healthyCoops(endpoint: CoopsEndpoint, url: URL): Response {
   if (endpoint === 'catalog') {
