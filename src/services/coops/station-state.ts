@@ -95,11 +95,11 @@ export interface CoopsCatalogs {
 const STATE_CODE_SET: ReadonlySet<string> = new Set(STATE_CODES);
 
 /**
- * True for a state value that is one of {@link STATE_CODES}. The catalogs also carry blanks,
- * nulls, and names — `United States of America`, `Bermuda`, `American Samoa` — which are not.
+ * True for a state value that is one of {@link STATE_CODES}. The catalogs also carry blanks and
+ * names — `United States of America`, `Bermuda`, `American Samoa` — which are not.
  */
-function isStateCode(value: string | null | undefined): value is string {
-  return value != null && STATE_CODE_SET.has(value);
+function isStateCode(value: string | undefined): value is string {
+  return value !== undefined && STATE_CODE_SET.has(value);
 }
 
 /**

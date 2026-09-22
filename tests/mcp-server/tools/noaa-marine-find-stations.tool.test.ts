@@ -83,14 +83,13 @@ const COOPS_SEATTLE_NAMED = {
 
 /**
  * A CO-OPS current station — alphanumeric ID, no NDBC mirror, so an ID query has only this row
- * to find. `currentpredictions` rows carry a null state, as CO-OPS publishes them.
+ * to find. `currentpredictions` rows carry no `state` field, as CO-OPS publishes them.
  */
 const COOPS_CURRENT_STATION = {
   id: 'ACT4176',
   name: 'Bowlers Wharf, Rappahannock River',
   lat: 37.8,
   lng: -76.7,
-  state: null,
   type: 'H',
 };
 

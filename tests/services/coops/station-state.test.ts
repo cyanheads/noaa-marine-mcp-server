@@ -15,7 +15,7 @@ import type { CoopsStation } from '@/services/coops/types.js';
  */
 const KM_PER_DEGREE_LAT = 111.19;
 
-function station(id: string, lat: number, state?: string | null, extra?: Partial<CoopsStation>) {
+function station(id: string, lat: number, state?: string, extra?: Partial<CoopsStation>) {
   return { id, name: id, lat, lng: -122, ...(state !== undefined ? { state } : {}), ...extra };
 }
 
@@ -40,7 +40,7 @@ describe('resolveStationStates', () => {
     // 0.2° of latitude apart: 22.2 km.
     const states = resolveStationStates({
       tide: [station('ANCHOR', 47.0, 'WA')],
-      current: [station('CUR1', 47.2, null)],
+      current: [station('CUR1', 47.2)],
       waterLevel: noCatalog,
     });
 
@@ -52,7 +52,7 @@ describe('resolveStationStates', () => {
     // 0.3° of latitude apart: 33.4 km.
     const states = resolveStationStates({
       tide: [station('ANCHOR', 47.0, 'WA')],
-      current: [station('CUR1', 47.3, null)],
+      current: [station('CUR1', 47.3)],
       waterLevel: noCatalog,
     });
 
@@ -64,7 +64,7 @@ describe('resolveStationStates', () => {
     // CUR1 sits 16.7 km from the OR row and 22.2 km from the WA row.
     const states = resolveStationStates({
       tide: [station('FARTHER', 47.0, 'WA'), station('NEARER', 47.35, 'OR')],
-      current: [station('CUR1', 47.2, null)],
+      current: [station('CUR1', 47.2)],
       waterLevel: noCatalog,
     });
 
@@ -85,7 +85,7 @@ describe('resolveStationStates', () => {
   it('draws derived states from water-level rows as well as tide rows', () => {
     const states = resolveStationStates({
       tide: noCatalog,
-      current: [station('CUR1', 47.1, null)],
+      current: [station('CUR1', 47.1)],
       waterLevel: [station('WL1', 47.0, 'WA')],
     });
 
@@ -96,7 +96,7 @@ describe('resolveStationStates', () => {
     // The closest rows carry names, not codes; the WA row farther away is the nearest code.
     const states = resolveStationStates({
       tide: [station('ANCHOR', 47.0, 'WA')],
-      current: [station('CUR1', 47.2, null)],
+      current: [station('CUR1', 47.2)],
       waterLevel: [
         station('USA', 47.21, 'United States of America'),
         station('BDA', 47.19, 'Bermuda'),
@@ -144,7 +144,7 @@ describe('resolveStationStates', () => {
   it('never derives from a current row, which carries no state', () => {
     const states = resolveStationStates({
       tide: noCatalog,
-      current: [station('CUR1', 47.0, null), station('CUR2', 47.05, 'WA')],
+      current: [station('CUR1', 47.0), station('CUR2', 47.05, 'WA')],
       waterLevel: noCatalog,
     });
 
@@ -166,7 +166,7 @@ describe('resolveStationStates', () => {
   });
 
   it('resolves a multi-bin current station once, from its first row', () => {
-    const bins = [15, 10, 1].map((currbin) => station('PUG1515', 47.1, null, { currbin }));
+    const bins = [15, 10, 1].map((currbin) => station('PUG1515', 47.1, undefined, { currbin }));
     const states = resolveStationStates({
       tide: [station('ANCHOR', 47.0, 'WA')],
       current: bins,
@@ -181,7 +181,7 @@ describe('resolveStationStates', () => {
     // Same latitude, 0.5° of longitude apart at 47° N: 37.9 km — beyond the radius.
     const states = resolveStationStates({
       tide: [{ id: 'ANCHOR', name: 'ANCHOR', lat: 47, lng: -122, state: 'WA' }],
-      current: [{ id: 'CUR1', name: 'CUR1', lat: 47, lng: -122.5, state: null }],
+      current: [{ id: 'CUR1', name: 'CUR1', lat: 47, lng: -122.5 }],
       waterLevel: noCatalog,
     });
 

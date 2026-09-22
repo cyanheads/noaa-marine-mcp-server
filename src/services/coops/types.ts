@@ -32,11 +32,11 @@ export interface CoopsStation {
   reference_id?: string;
   /**
    * The state as the catalog publishes it, which is not always a state code: `currentpredictions`
-   * rows carry null, some `tidepredictions` rows a blank, and a few `waterlevels` rows a name
+   * rows omit it, some `tidepredictions` rows carry a blank, and a few `waterlevels` rows a name
    * (`United States of America`, `Bermuda`). Read a station's state through
    * `CoopsService.stationStates()`, which resolves it once per catalog refresh.
    */
-  state?: string | null;
+  state?: string;
   /**
    * Prediction-class code, decoded by `prediction-class.ts`. `tidepredictions` publishes
    * R and S; `currentpredictions` publishes H, S, and W. `waterlevels` has no `type` field.
