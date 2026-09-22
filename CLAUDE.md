@@ -111,8 +111,15 @@ export const noaaMarineStationResource = resource('noaa-marine://station/{statio
   }),
   async handler(params, ctx) {
     const coopsSvc = getCoopsService();
-    const ndbcSvc = getNdbcService();
-    const station = await coopsSvc.getStation(params.station_id) ?? ndbcSvc.getStation(params.station_id);
+    const id = params.station_id.toUpperCase();
+    // Station lookups read the cached catalogs — there is no per-station fetch.
+    const [tide, current, waterLevel, ndbc] = await Promise.all([
+      coopsSvc.getStations('tidepredictions', ctx),
+      coopsSvc.getStations('currentpredictions', ctx),
+      coopsSvc.getStations('waterlevels', ctx),
+      getNdbcService().getActiveStations(ctx),
+    ]);
+    const station = [...tide, ...current, ...waterLevel, ...ndbc].find((s) => s.id.toUpperCase() === id);
     if (!station) throw notFound(`Station ${params.station_id} not found`);
     return station;
   },
@@ -227,11 +234,13 @@ src/
     server-config.ts                    # NOAA_APPLICATION_ID env var (optional, defaults to server name)
   services/
     coops/
-      coops-service.ts                  # CO-OPS Tides & Currents API (station cache, data fetch, message classifier, 403 throttle mapping)
+      coops-service.ts                  # CO-OPS Tides & Currents API (station cache, resolved-state cache, data fetch, message classifier, 403 throttle mapping)
       date-range.ts                     # YYYYMMDD / YYYY-MM-DD calendar validation, compaction, and span, shared by the date-ranged tools
       prediction-class.ts               # Decodes the catalog `type` letter into a prediction class
       row-page.ts                       # Byte-bounded row paging shared by the time-series tools
+      station-state.ts                  # State codes; resolves each station's state (published, else nearest state-bearing row within 25 km)
       types.ts                          # CO-OPS domain types
+    geo.ts                              # Haversine distance, shared by proximity search and state resolution
     ndbc/
       ndbc-service.ts                   # NDBC buoy service (active stations XML, realtime text)
       types.ts                          # NDBC domain types
@@ -285,7 +294,7 @@ Available skills:
 | `code-simplifier` | Post-session cleanup against `git diff` — modernize syntax, consolidate duplication, align with the codebase |
 | `polish-docs-meta` | Finalize docs, README, metadata, and agent protocol for shipping |
 | `git-wrapup` | Land working-tree changes as a commit stack — version bump, changelog, verify, commit by concern, release commit on top. No tag, no push to main; opens the release PR when the project declares release PR mode |
-| `release-pr-review` | Review pass on an open release PR — simplifier + correctness review, fixup commits autosquashed into the stack, PR body kept in sync. Release PR mode only |
+| `release-pr-review` | Review pass on an open release PR — simplifier + correctness review, fixes as ordinary commits on top of the stack, PR body kept in sync. Release PR mode only |
 | `release-and-publish` | Fast-forward merge (release PR mode) + tag + push + npm + MCP Registry + GH Release + Docker. Picks up from `git-wrapup` |
 | `maintenance` | Investigate changelogs, adopt upstream changes, sync skills to agent dirs |
 | `orchestrations` | Chain task skills into a gated multi-phase pipeline — build-out, QA-fix, update-ship — when you can spawn sub-agents |
