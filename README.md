@@ -56,6 +56,7 @@ All resource data is also reachable via tools — use `noaa_marine_find_stations
 ### `noaa_marine_find_stations` <sub>tool</sub>
 
 - Filter by proximity (`latitude`/`longitude` + `radius_km`, default 100 km, max 1000 km), name/ID substring (matched against both sources; an exact ID match sorts first), US state/territory (CO-OPS only), source (`coops`/`ndbc`/`all`), or `types`: data capabilities (`tide`, `current`, `water_level`, `met`, `current_profile`, `water_quality`) or NDBC platform class (`buoy`)
+- A CO-OPS station whose catalog rows carry no state code — every current station, and some tide and water-level stations — reports and filters on the state of the nearest state-bearing tide or water-level station within 25 km, marked `state_derived: true`; that state can be wrong on waters shared across a state or national border. A station with no such neighbor shows its own non-code catalog value (e.g. `FM`) if it publishes one, which no state filter matches
 - Returns up to `limit` (default 20, max 200) unified stations with source, coordinates, distance, data capabilities, and — for NDBC — physical platform class (buoy, fixed, oilrig, dart, tao, usv, other)
 - CO-OPS prediction stations also carry `prediction_class`, a third axis beside capability and platform: a tide station is `reference` (serving `hilo` and the 6-minute curve) or `subordinate` (`hilo` only, with `reference_id` naming where its offsets come from), while a current station reports its class per depth bin in `bins[]` alongside each bin's number and catalog depth in feet — the bin numbers `noaa_marine_get_currents` takes as `bin`
 - `total_found` and `truncated` report the full match count before the limit is applied
@@ -137,7 +138,7 @@ All resource data is also reachable via tools — use `noaa_marine_find_stations
 
 ### `noaa-marine://station/{station_id}` <sub>resource</sub>
 
-- Station record as `application/json` — name, coordinates, source, capabilities, state, the CO-OPS `prediction_class` (with `reference_id` or per-bin `bins[]`, exactly as on `noaa_marine_find_stations`), and (NDBC) platform class
+- Station record as `application/json` — name, coordinates, source, capabilities, state (with `state_derived`, resolved as on `noaa_marine_find_stations`), the CO-OPS `prediction_class` (with `reference_id` or per-bin `bins[]`, exactly as on `noaa_marine_find_stations`), and (NDBC) platform class
 - `station_id` comes from `noaa_marine_find_stations`
 - Typed `station_not_found` when both catalogs were read and neither carries the ID, and `source_unavailable` when a catalog could not be read — a station only the unread catalog carries is never reported as nonexistent. When the unread CO-OPS catalog was throttled (HTTP 403), the recovery names the couple-of-minutes wait
 - Cached with a 6-hour TTL (`cacheHint`)
