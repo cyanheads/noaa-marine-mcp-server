@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.5.2](changelog/0.5.x/0.5.2.md) — 2026-09-22
+
+Derived state for stateless CO-OPS stations, truncation notice fix
+
 ## [0.5.1](changelog/0.5.x/0.5.1.md) — 2026-09-22
 
 CO-OPS throttling as a typed error, residual sign clamp, hyphenated dates

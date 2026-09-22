@@ -1,7 +1,7 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "noaa-marine-mcp-server",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "Find NOAA tide stations and NDBC buoys, fetch tide predictions, water levels, tidal currents, and live buoy conditions via MCP. STDIO or Streamable HTTP.",
   "author": {
     "name": "cyanheads",

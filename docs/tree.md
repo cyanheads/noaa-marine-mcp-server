@@ -1,6 +1,6 @@
 # noaa-marine-mcp-server - Directory Structure
 
-Generated on: 2026-09-22 22:19:31
+Generated on: 2026-09-22 23:18:20
 
 ```text
 noaa-marine-mcp-server/
@@ -161,10 +161,12 @@ noaa-marine-mcp-server/
 │   │   │   ├── date-range.ts
 │   │   │   ├── prediction-class.ts
 │   │   │   ├── row-page.ts
+│   │   │   ├── station-state.ts
 │   │   │   └── types.ts
-│   │   └── ndbc/
-│   │       ├── ndbc-service.ts
-│   │       └── types.ts
+│   │   ├── ndbc/
+│   │   │   ├── ndbc-service.ts
+│   │   │   └── types.ts
+│   │   └── geo.ts
 │   └── index.ts
 ├── tests/
 │   ├── mcp-server/
@@ -186,7 +188,8 @@ noaa-marine-mcp-server/
 │   │   ├── coops/
 │   │   │   ├── coops-service.test.ts
 │   │   │   ├── date-range.test.ts
-│   │   │   └── row-page.test.ts
+│   │   │   ├── row-page.test.ts
+│   │   │   └── station-state.test.ts
 │   │   └── ndbc/
 │   │       └── ndbc-service.test.ts
 │   ├── support/
