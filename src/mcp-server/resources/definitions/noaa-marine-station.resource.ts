@@ -11,7 +11,7 @@ import { getNdbcService } from '@/services/ndbc/ndbc-service.js';
 
 export const noaaMarineStationResource = resource('noaa-marine://station/{station_id}', {
   name: 'noaa_marine_station',
-  description: `Metadata for a CO-OPS or NDBC station by ID: name, coordinates, source, data capabilities, the CO-OPS prediction class, and — for NDBC — the physical platform class. The type field is the primary data capability, meaning the same thing here as in noaa_marine_find_stations, and is omitted when the station reports no data capability; platform is the NDBC platform class (buoy, fixed, oilrig, dart, tao, usv, other), a separate axis that CO-OPS stations do not carry. prediction_class is a third axis, again identical to the field of that name on noaa_marine_find_stations: a tide station is reference (serving both hilo and the 6-minute curve) or subordinate (hilo only, with reference_id naming the station its offsets come from), while a current station carries its class per depth bin in bins[], whose bin numbers are what noaa_marine_get_currents takes as bin. CO-OPS station IDs are numeric for tide and water-level stations and alphanumeric for current stations, while NDBC station IDs are 5-character alphanumeric codes — use noaa_marine_find_stations to discover them. A station ID that neither catalog carries is a station_not_found error, distinct from source_unavailable, which says a catalog could not be read and so was never searched.`,
+  description: `Metadata for a CO-OPS or NDBC station by ID: name, coordinates, source, data capabilities, the CO-OPS prediction class, and — for NDBC — the physical platform class. The type field is the primary data capability, meaning the same thing here as in noaa_marine_find_stations, and is omitted when the station reports no data capability; platform is the NDBC platform class (buoy, fixed, oilrig, dart, tao, usv, other), a separate axis that CO-OPS stations do not carry. prediction_class is a third axis, again identical to the field of that name on noaa_marine_find_stations: a tide station is reference (serving both hilo and the 6-minute curve) or subordinate (hilo only, with reference_id naming the station its offsets come from), while a current station carries its class per depth bin in bins[], whose bin numbers are what noaa_marine_get_currents takes as bin. state is a CO-OPS station's US state or territory code, resolved as on noaa_marine_find_stations: its own catalog code, or — when its catalog rows carry none, as with every current station — the state of the nearest state-bearing tide or water-level station within 25 km, marked state_derived: true and possibly wrong on waters shared across a state or national border; failing both, the station's own non-code catalog value (e.g. FM) as published, and otherwise omitted. CO-OPS station IDs are numeric for tide and water-level stations and alphanumeric for current stations, while NDBC station IDs are 5-character alphanumeric codes — use noaa_marine_find_stations to discover them. A station ID that neither catalog carries is a station_not_found error, distinct from source_unavailable, which says a catalog could not be read and so was never searched.`,
   mimeType: 'application/json',
   cacheHint: { ttlMs: 21_600_000, cacheScope: 'public' },
   params: z.object({
@@ -86,7 +86,12 @@ export const noaaMarineStationResource = resource('noaa-marine://station/{statio
         // both surfaces (#14): on the row for a tide station, and per bin for a current station,
         // whose bins can mix classes. CO-OPS has no platform class.
         if (caps[0]) result.type = caps[0];
-        if (match.state) result.state = match.state;
+        // The same resolved state noaa_marine_find_stations reports and filters on.
+        const resolved = coopsSvc.stationStates({ tide, current, waterLevel }).get(match.id);
+        if (resolved) {
+          result.state = resolved.state;
+          if (resolved.derived) result.state_derived = true;
+        }
         const predictionClass = tidePredictionClass(tideRow?.type);
         if (predictionClass) result.prediction_class = predictionClass;
         // A reference station's row carries `reference_id` as an empty string.

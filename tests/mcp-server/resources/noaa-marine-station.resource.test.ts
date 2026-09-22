@@ -4,12 +4,18 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createFetchMock, createMockContext } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  createFetchMock,
+  createMockContext,
+  type FetchMockHarness,
+  runToolContract,
+} from '@cyanheads/mcp-ts-core/testing';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { noaaMarineStationResource } from '@/mcp-server/resources/definitions/noaa-marine-station.resource.js';
+import { noaaMarineFindStations } from '@/mcp-server/tools/definitions/noaa-marine-find-stations.tool.js';
 import { initCoopsService } from '@/services/coops/coops-service.js';
 import { getNdbcService, initNdbcService } from '@/services/ndbc/ndbc-service.js';
-import { callsTo, installCoopsFake } from '../../support/coops-http.js';
+import { callsTo, installCoopsFake, stateCatalogCoops } from '../../support/coops-http.js';
 
 const COOPS_TIDE_STATION = {
   id: '9447130',
@@ -599,5 +605,99 @@ describe('noaaMarineStationResource under a CO-OPS throttle', () => {
 
     expect(error).toBeUndefined();
     expect(value).toMatchObject({ station_id: '46041', source: 'ndbc' });
+  });
+});
+
+// --- #36: the resource reports the same resolved state as noaa_marine_find_stations ---
+
+describe('noaaMarineStationResource state resolution through the CO-OPS service', () => {
+  let http: FetchMockHarness;
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    initCoopsService(null as any, null as any, { applicationId: 'test' });
+    initNdbcService();
+    vi.spyOn(getNdbcService(), 'getActiveStations').mockResolvedValue([NDBC_BUOY]);
+    http = installCoopsFake(stateCatalogCoops);
+  });
+
+  afterEach(() => {
+    http.restore();
+  });
+
+  async function readStation(stationId: string): Promise<Record<string, unknown>> {
+    const ctx = createMockContext({ tenantId: 'test', errors: noaaMarineStationResource.errors });
+    const params = noaaMarineStationResource.params!.parse({ station_id: stationId });
+    return (await noaaMarineStationResource.handler(params, ctx)) as Record<string, unknown>;
+  }
+
+  it('keeps a published state and marks nothing derived (9447130 → WA)', async () => {
+    const station = await readStation('9447130');
+
+    expect(station.state).toBe('WA');
+    expect(station).not.toHaveProperty('state_derived');
+  });
+
+  it('reports a derived state and state_derived: true for a current-only station (PUG1515)', async () => {
+    const station = await readStation('pug1515');
+
+    expect(station).toMatchObject({ station_id: 'PUG1515', state: 'WA', state_derived: true });
+    expect(station.bins).toHaveLength(3);
+  });
+
+  it('derives the state of a stateless tide row within 25 km (TWC1165 → WA)', async () => {
+    expect(await readStation('TWC1165')).toMatchObject({ state: 'WA', state_derived: true });
+  });
+
+  it('reports no state for a station with no state-bearing row within 25 km (PCT0016)', async () => {
+    const station = await readStation('PCT0016');
+
+    expect(station).not.toHaveProperty('state');
+    expect(station).not.toHaveProperty('state_derived');
+  });
+
+  it('reports no state where the first row is blank, whatever a later row names (1619910, Midway)', async () => {
+    const station = await readStation('1619910');
+
+    expect(station.capabilities).toEqual(['tide', 'water_level']);
+    expect(station).not.toHaveProperty('state');
+  });
+
+  it("reports a station's own non-code value unmarked (1840000 → FM)", async () => {
+    const station = await readStation('1840000');
+
+    expect(station).toMatchObject({ station_id: '1840000', state: 'FM' });
+    expect(station).not.toHaveProperty('state_derived');
+  });
+
+  it('agrees with noaa_marine_find_stations on state and state_derived for every station', async () => {
+    for (const id of [
+      '9447130',
+      'PUG1515',
+      'TWC1165',
+      '9449880',
+      'PCT0016',
+      '1619910',
+      '1840000',
+    ]) {
+      const station = await readStation(id);
+      const search = await runToolContract(noaaMarineFindStations, { query: id, source: 'coops' });
+      const row = (
+        search.structuredContent as { stations: Record<string, unknown>[] }
+      ).stations.find((s) => s.station_id === id)!;
+
+      expect(row.state, id).toBe(station.state);
+      expect(row.state_derived, id).toBe(station.state_derived);
+    }
+    // Every read and search shared one fetch of each catalog.
+    expect(callsTo(http, 'catalog')).toHaveLength(3);
+  });
+
+  it('still answers an NDBC station with no state', async () => {
+    const station = await readStation('46041');
+
+    expect(station.source).toBe('ndbc');
+    expect(station).not.toHaveProperty('state');
   });
 });
