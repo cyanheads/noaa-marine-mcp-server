@@ -5,7 +5,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { getCoopsService } from '@/services/coops/coops-service.js';
+import { getCoopsService, isCoopsThrottled } from '@/services/coops/coops-service.js';
 import { currentPredictionClass, tidePredictionClass } from '@/services/coops/prediction-class.js';
 import { getNdbcService } from '@/services/ndbc/ndbc-service.js';
 
@@ -586,10 +586,23 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
     // Every catalog the search needed is down. Zero rows here is an upstream failure, not an
     // empty search, so it must not be reported as one.
     if (attempted.length > 0 && answered.length === 0) {
+      // A throttled CO-OPS leg clears on its own after a couple of minutes, and retrying
+      // "in a few moments" only re-sends into the block — so the hint names the wait instead.
+      const coopsThrottled =
+        coopsResults.status === 'rejected' && isCoopsThrottled(coopsResults.reason);
       throw ctx.fail(
         'sources_unavailable',
         `The ${failed.join(' and ')} station ${failed.length > 1 ? 'catalogs' : 'catalog'} could not be read, so no station list was searched.`,
-        { ...ctx.recoveryFor('sources_unavailable'), failed_sources: failed },
+        {
+          ...(coopsThrottled
+            ? {
+                recovery: {
+                  hint: 'CO-OPS is temporarily refusing requests from this server after a burst of calls. Wait a couple of minutes before searching again, and space successive calls rather than sending them back to back.',
+                },
+              }
+            : ctx.recoveryFor('sources_unavailable')),
+          failed_sources: failed,
+        },
       );
     }
 

@@ -60,8 +60,48 @@ describe('validateCoopsDateRange', () => {
     if (!result.ok) expect(result.error).toMatch(/begin_date.*after.*end_date/i);
   });
 
-  it('rejects a malformed (non-8-digit) string', () => {
-    const result = validateCoopsDateRange('2025-01-15', '20250116');
+  it('rejects a string in neither accepted form', () => {
+    for (const malformed of ['2025/01/15', '2025-1-15', '20250115T00', '01-15-2025', '202501']) {
+      const result = validateCoopsDateRange(malformed, '20250116');
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toContain(`begin_date "${malformed}"`);
+    }
+  });
+
+  it('returns the compact YYYYMMDD strings CO-OPS takes', () => {
+    const result = validateCoopsDateRange('20250115', '20250116');
+    expect(result).toMatchObject({ ok: true, beginDate: '20250115', endDate: '20250116' });
+  });
+
+  it('accepts YYYY-MM-DD and compacts it, measuring the same span', () => {
+    const iso = validateCoopsDateRange('2024-01-01', '2025-01-01');
+    expect(iso).toMatchObject({
+      ok: true,
+      beginDate: '20240101',
+      endDate: '20250101',
+      spanDays: 366,
+    });
+  });
+
+  it('reads each field on its own when the pair mixes forms', () => {
+    expect(validateCoopsDateRange('20250115', '2025-01-20')).toMatchObject({
+      ok: true,
+      beginDate: '20250115',
+      endDate: '20250120',
+      spanDays: 5,
+    });
+  });
+
+  it('runs the calendar check on the hyphenated form and names the date as given', () => {
+    const result = validateCoopsDateRange('2025-02-31', '2025-03-02');
     expect(result.ok).toBe(false);
+    if (!result.ok)
+      expect(result.error).toBe('begin_date "2025-02-31" is not a real calendar date.');
+  });
+
+  it('names a reversed hyphenated range as given', () => {
+    const result = validateCoopsDateRange('2025-01-10', '20250101');
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toContain('"2025-01-10" is after end_date "20250101"');
   });
 });

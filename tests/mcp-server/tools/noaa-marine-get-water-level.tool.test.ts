@@ -504,7 +504,8 @@ describe('noaaMarineGetWaterLevel', () => {
 
       // Only the two finite pairs join: 8.11 − 8.00 = 0.11 and 8.44 − 8.40 = 0.04. The three
       // gap slots have a prediction but no observation, so they contribute no residual at all.
-      expect(result.residual_summary).toEqual({ max_surge: 0.11, max_drawdown: 0.04 });
+      // Both pairs sit above prediction, so there is no drawdown.
+      expect(result.residual_summary).toEqual({ max_surge: 0.11, max_drawdown: 0 });
     });
 
     it('discloses the dropped-gap count on both consumption surfaces', async () => {
@@ -557,7 +558,7 @@ describe('noaaMarineGetWaterLevel', () => {
         { time: '2025-01-15 12:00', value: 8.23, sigma: 0.01, quality: 'p' },
         { time: '2025-01-15 12:06', value: 8.31, sigma: 0.01, quality: 'p' },
       ]);
-      expect(structured.residual_summary).toEqual({ max_surge: 0.03, max_drawdown: 0.03 });
+      expect(structured.residual_summary).toEqual({ max_surge: 0.03, max_drawdown: 0 });
     });
 
     it('reports no_data when every row CO-OPS sent was a gap', async () => {
@@ -600,6 +601,84 @@ describe('noaaMarineGetWaterLevel', () => {
 
       expect(result.observations[0]?.sigma).toBe(0.01);
       expect(result.observations[1]?.sigma).toBe(0.02);
+    });
+  });
+
+  // --- #35: a side of the residual that never occurred in the window reports 0, not a signed value ---
+
+  describe('residual sign convention', () => {
+    /** Six 6-minute slots with a fixed prediction, so each residual is exactly obs − 5.00. */
+    function window(residuals: number[]) {
+      const times = residuals.map((_, i) => `2026-09-16 00:${String(i * 6).padStart(2, '0')}`);
+      return {
+        obs: residuals.map((r, i) => ({
+          t: times[i]!,
+          v: (5 + r).toFixed(3),
+          s: '0.01',
+          f: '0,0,0,0',
+          q: 'p',
+        })),
+        pred: times.map((t) => ({ t, v: '5.000' })),
+      };
+    }
+
+    async function residualFor(residuals: number[], units: 'english' | 'metric' = 'english') {
+      const { getCoopsService } = await import('@/services/coops/coops-service.js');
+      const svc = getCoopsService();
+      const { obs, pred } = window(residuals);
+      vi.spyOn(svc, 'fetchWaterLevel').mockResolvedValue({ data: obs, stationName: 'Vancouver' });
+      vi.spyOn(svc, 'fetchWaterLevelPredictions').mockResolvedValue(pred);
+      const result = await runToolContract(noaaMarineGetWaterLevel, {
+        station_id: '9440083',
+        begin_date: '20260916',
+        end_date: '20260916',
+        datum: 'CRD',
+        units,
+      });
+      return {
+        structured: result.structuredContent as {
+          residual_summary?: { max_surge: number; max_drawdown: number };
+        },
+        text: result.content.map((b) => (b as { text?: string }).text ?? '').join('\n'),
+      };
+    }
+
+    it('reports no surge on a window that sat below prediction throughout', async () => {
+      const { structured, text } = await residualFor([-0.03, -0.4, -1.62, -0.9, -0.2, -0.05]);
+
+      expect(structured.residual_summary).toEqual({ max_surge: 0, max_drawdown: 1.62 });
+      expect(text).toContain('**Max surge:** 0 ft · **Max drawdown:** 1.62 ft');
+      expect(text).not.toContain('-0.03 ft');
+    });
+
+    it('reports no drawdown on a window that sat above prediction throughout', async () => {
+      const { structured, text } = await residualFor([1.99, 2.4, 2.83, 2.1, 2.05, 2.2]);
+
+      expect(structured.residual_summary).toEqual({ max_surge: 2.83, max_drawdown: 0 });
+      expect(text).toContain('**Max surge:** 2.83 ft · **Max drawdown:** 0 ft');
+    });
+
+    it('leaves a mixed-sign window at its true magnitudes on both sides', async () => {
+      const { structured, text } = await residualFor([0.3, -0.12, 0.47, -0.25, 0.01, -0.04]);
+
+      expect(structured.residual_summary).toEqual({ max_surge: 0.47, max_drawdown: 0.25 });
+      expect(text).toContain('**Max surge:** 0.47 ft · **Max drawdown:** 0.25 ft');
+    });
+
+    it('applies the same convention in metric units', async () => {
+      const { structured, text } = await residualFor(
+        [-0.2, -0.5, -0.1, -0.3, -0.45, -0.05],
+        'metric',
+      );
+
+      expect(structured.residual_summary).toEqual({ max_surge: 0, max_drawdown: 0.5 });
+      expect(text).toContain('**Max surge:** 0 m · **Max drawdown:** 0.5 m');
+    });
+
+    it('reports 0 on both sides when every observation equals its prediction', async () => {
+      const { structured } = await residualFor([0, 0, 0, 0, 0, 0]);
+
+      expect(structured.residual_summary).toEqual({ max_surge: 0, max_drawdown: 0 });
     });
   });
 
@@ -831,6 +910,38 @@ describe('noaaMarineGetWaterLevel', () => {
       };
 
       expect(structured.residual_summary?.max_surge).toBeCloseTo(4.05, 2);
+    });
+
+    it('clamps across the full matched series on every page, not only the first', async () => {
+      const { getCoopsService } = await import('@/services/coops/coops-service.js');
+      const svc = getCoopsService();
+      // Every slot sits 0.05 below prediction, and the deepest drawdown is the last slot.
+      const below = THREE_DAYS.map((row) => ({
+        t: row.t,
+        v: (Number.parseFloat(row.v) + 0.05).toFixed(3),
+      }));
+      const dip = THREE_DAYS.map((row, i) =>
+        i === 719 ? { ...row, v: (Number.parseFloat(row.v) - 3).toFixed(3) } : row,
+      );
+      vi.spyOn(svc, 'fetchWaterLevel').mockResolvedValue({ data: dip, stationName: 'Seattle' });
+      vi.spyOn(svc, 'fetchWaterLevelPredictions').mockResolvedValue(below);
+
+      const summaries: unknown[] = [];
+      for (const offset of [0, 300, 719]) {
+        const result = await runToolContract(noaaMarineGetWaterLevel, {
+          begin_date: '20260901',
+          end_date: '20260903',
+          offset,
+          station_id: '9447130',
+        });
+        summaries.push(
+          (result.structuredContent as { residual_summary?: unknown }).residual_summary,
+        );
+      }
+
+      for (const summary of summaries) {
+        expect(summary).toEqual({ max_surge: 0, max_drawdown: 3.05 });
+      }
     });
 
     it('returns a fitting range whole, with no paging disclosure at all', async () => {

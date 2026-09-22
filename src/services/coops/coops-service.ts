@@ -5,7 +5,12 @@
 
 import type { Context } from '@cyanheads/mcp-ts-core';
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
-import { JsonRpcErrorCode, McpError, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
+import {
+  JsonRpcErrorCode,
+  McpError,
+  rateLimited,
+  serviceUnavailable,
+} from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import { fetchWithTimeout, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import type { ServerConfig } from '@/config/server-config.js';
@@ -201,6 +206,42 @@ function coopsMessageFromBody(body: string): string {
   }
 }
 
+/**
+ * The contract reason a throttled CO-OPS request carries. CO-OPS answers a burst of requests
+ * from one address with HTTP 403 for about two minutes; its API documents per-customer
+ * throttling but names neither the status nor the window, so both are what it was observed to do.
+ */
+const THROTTLED_REASON = 'upstream_throttled';
+
+/**
+ * The throttle, when `err` is the HTTP 403 CO-OPS sends while it is throttling this address.
+ *
+ * Read from the status, before any body classification — a 403 is the block whatever its body
+ * says. Applied on the rejection path *after* `withRetry`: `RateLimited` is transient to the
+ * retry loop, so mapping it inside the closure would re-send the request into the block. The
+ * upstream body stays off the error, and the calling tool's declared recovery rides along
+ * through `ctx.recoveryFor`, which resolves against that tool's contract.
+ */
+function throttledError(err: unknown, ctx: Context): McpError | undefined {
+  if (!(err instanceof McpError)) return;
+  if (err.data?.status !== 403) return;
+  return rateLimited(
+    'CO-OPS refused the request with HTTP 403, which it returns while it throttles a burst of requests from one address.',
+    {
+      reason: THROTTLED_REASON,
+      retryable: true,
+      status: 403,
+      ...ctx.recoveryFor(THROTTLED_REASON),
+    },
+    { cause: err },
+  );
+}
+
+/** Whether a CO-OPS rejection is the throttle, for callers that fold it into their own failure. */
+export function isCoopsThrottled(err: unknown): boolean {
+  return err instanceof McpError && err.data?.reason === THROTTLED_REASON;
+}
+
 const DATA_URL = 'https://api.tidesandcurrents.noaa.gov/api/prod/datagetter';
 const MDAPI_URL = 'https://api.tidesandcurrents.noaa.gov/mdapi/prod/webapi/stations.json';
 const CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
@@ -244,7 +285,9 @@ export class CoopsService {
         maxRetries: 2,
         signal: ctx.signal,
       },
-    );
+    ).catch((err: unknown) => {
+      throw throttledError(err, ctx) ?? err;
+    });
 
     this.stationCache.set(type, { stations, fetchedAt: Date.now() });
     ctx.log.debug('CO-OPS station list cached', { type, count: stations.length });
@@ -308,7 +351,7 @@ export class CoopsService {
         maxRetries: 3,
         signal: ctx.signal,
       },
-    ).catch((err: unknown) => this.rethrowClassified(err, params.datum));
+    ).catch((err: unknown) => this.rethrowClassified(err, ctx, params.datum));
   }
 
   /**
@@ -363,7 +406,7 @@ export class CoopsService {
         maxRetries: 3,
         signal: ctx.signal,
       },
-    ).catch((err: unknown) => this.rethrowClassified(err, params.datum));
+    ).catch((err: unknown) => this.rethrowClassified(err, ctx, params.datum));
   }
 
   /**
@@ -414,7 +457,7 @@ export class CoopsService {
         maxRetries: 2,
         signal: ctx.signal,
       },
-    ).catch((err: unknown) => this.rethrowClassified(err, params.datum));
+    ).catch((err: unknown) => this.rethrowClassified(err, ctx, params.datum));
   }
 
   /** Fetch current predictions for a station, optionally for a specific depth bin. */
@@ -482,7 +525,7 @@ export class CoopsService {
         maxRetries: 3,
         signal: ctx.signal,
       },
-    ).catch((err: unknown) => this.rethrowClassified(err));
+    ).catch((err: unknown) => this.rethrowClassified(err, ctx));
   }
 
   private buildDataUrl(params: Record<string, string>): string {
@@ -520,13 +563,16 @@ export class CoopsService {
   }
 
   /**
-   * Re-throws an HTTP failure as a typed `CoopsBodyError` when its captured body carries a
-   * message the classifier recognizes — CO-OPS rejects a bad bin with an HTTP 400 whose body
-   * names the station's real bins, and a datum the station does not carry with a 400 whose body
-   * names the datum, which is the recovery the caller needs in both cases. Anything else
-   * bubbles unchanged so the tool's generic status handling still applies.
+   * Re-throws an HTTP failure as the throttle when CO-OPS answered 403, and otherwise as a typed
+   * `CoopsBodyError` when its captured body carries a message the classifier recognizes — CO-OPS
+   * rejects a bad bin with an HTTP 400 whose body names the station's real bins, and a datum the
+   * station does not carry with a 400 whose body names the datum, which is the recovery the
+   * caller needs in both cases. Anything else bubbles unchanged so the tool's generic status
+   * handling still applies.
    */
-  private rethrowClassified(err: unknown, requestedDatum?: string): never {
+  private rethrowClassified(err: unknown, ctx: Context, requestedDatum?: string): never {
+    const throttled = throttledError(err, ctx);
+    if (throttled) throw throttled;
     const data =
       err instanceof McpError ? (err.data as Record<string, unknown> | undefined) : undefined;
     if (typeof data?.body === 'string') {

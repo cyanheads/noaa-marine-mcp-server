@@ -8,7 +8,8 @@ import { createFetchMock, createMockContext } from '@cyanheads/mcp-ts-core/testi
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { noaaMarineStationResource } from '@/mcp-server/resources/definitions/noaa-marine-station.resource.js';
 import { initCoopsService } from '@/services/coops/coops-service.js';
-import { initNdbcService } from '@/services/ndbc/ndbc-service.js';
+import { getNdbcService, initNdbcService } from '@/services/ndbc/ndbc-service.js';
+import { callsTo, installCoopsFake } from '../../support/coops-http.js';
 
 const COOPS_TIDE_STATION = {
   id: '9447130',
@@ -515,5 +516,88 @@ describe('noaaMarineStationResource', () => {
     } finally {
       http.restore();
     }
+  });
+});
+
+// --- #37: a throttled CO-OPS catalog clears after a couple of minutes, not "a few moments" ---
+
+describe('noaaMarineStationResource under a CO-OPS throttle', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    initCoopsService(null as any, null as any, { applicationId: 'test' });
+    initNdbcService();
+  });
+
+  /** Reads the station through the real CO-OPS service against a fake upstream. */
+  async function readStation(stationId: string, coopsStatus: number) {
+    const ctx = createMockContext({ tenantId: 'test', errors: noaaMarineStationResource.errors });
+    const http = installCoopsFake(
+      () => new Response('{"message":"refused"}', { status: coopsStatus }),
+    );
+    try {
+      const params = noaaMarineStationResource.params!.parse({ station_id: stationId });
+      let outcome: { error?: unknown; value?: unknown };
+      try {
+        outcome = { value: await noaaMarineStationResource.handler(params, ctx) };
+      } catch (error) {
+        outcome = { error };
+      }
+      return { ...outcome, catalogCalls: callsTo(http, 'catalog').length };
+    } finally {
+      http.restore();
+    }
+  }
+
+  function hintOf(error: unknown): string {
+    const hint = (error as { data?: { recovery?: { hint?: unknown } } }).data?.recovery?.hint;
+    if (typeof hint !== 'string') throw new Error('The error carries no recovery hint.');
+    return hint;
+  }
+
+  it('names the wait in source_unavailable when the CO-OPS catalog was throttled', async () => {
+    vi.spyOn(getNdbcService(), 'getActiveStations').mockResolvedValue([NDBC_BUOY]);
+
+    const { error, catalogCalls } = await readStation('9447130', 403);
+
+    expect(error).toMatchObject({
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      data: { reason: 'source_unavailable', unread_sources: ['coops'] },
+    });
+    expect(hintOf(error)).toContain('couple of minutes');
+    expect(hintOf(error)).not.toContain('a few moments');
+    // One request per catalog, none re-sent into the block.
+    expect(catalogCalls).toBe(3);
+  });
+
+  it('names the wait when both catalogs failed and CO-OPS was the throttle', async () => {
+    vi.spyOn(getNdbcService(), 'getActiveStations').mockRejectedValue(new Error('NDBC down'));
+
+    const { error } = await readStation('9447130', 403);
+
+    expect(error).toMatchObject({
+      data: { reason: 'source_unavailable', unread_sources: ['coops', 'ndbc'] },
+    });
+    expect(hintOf(error)).toContain('couple of minutes');
+  });
+
+  it('keeps the original recovery for a CO-OPS catalog failure that is not the throttle', async () => {
+    vi.spyOn(getNdbcService(), 'getActiveStations').mockResolvedValue([NDBC_BUOY]);
+
+    const { error } = await readStation('9447130', 404);
+
+    expect(error).toMatchObject({ data: { reason: 'source_unavailable' } });
+    expect(hintOf(error)).toBe(
+      'Retry in a few moments — the station catalogs are cached for six hours once a fetch succeeds.',
+    );
+  });
+
+  it('still answers from NDBC when CO-OPS is throttled and NDBC carries the ID', async () => {
+    vi.spyOn(getNdbcService(), 'getActiveStations').mockResolvedValue([NDBC_BUOY]);
+
+    const { value, error } = await readStation('46041', 403);
+
+    expect(error).toBeUndefined();
+    expect(value).toMatchObject({ station_id: '46041', source: 'ndbc' });
   });
 });

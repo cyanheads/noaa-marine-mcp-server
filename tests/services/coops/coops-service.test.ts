@@ -5,9 +5,11 @@
  * @module tests/services/coops/coops-service.test
  */
 
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createFetchMock, createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { getCoopsService, initCoopsService } from '@/services/coops/coops-service.js';
+import { type CoopsEndpoint, callsTo, installCoopsFake } from '../../support/coops-http.js';
 
 /** A live `MAX_SLACK` envelope: `Velocity_Major` and the mean bearings are JSON numbers, `Bin` and `Depth` strings. */
 const MAX_SLACK_BODY = {
@@ -528,3 +530,175 @@ describe('CoopsService coarse water-level products', () => {
     }
   });
 });
+
+// --- #37: an HTTP 403 is CO-OPS throttling this address, not a bad request ---
+
+/**
+ * Every CO-OPS request site, driven through the real `withRetry` against a fake upstream, so
+ * the request count below is what the retry loop actually sent.
+ */
+const REQUEST_SITES: {
+  name: string;
+  endpoint: CoopsEndpoint;
+  /** Requests a transient failure costs: the first plus the site's `maxRetries`. */
+  attempts: number;
+  call: (ctx: ReturnType<typeof createMockContext>) => Promise<unknown>;
+}[] = [
+  {
+    name: 'getStations',
+    endpoint: 'catalog',
+    attempts: 3,
+    call: (ctx) => getCoopsService().getStations('tidepredictions', ctx),
+  },
+  {
+    name: 'fetchTidePredictions',
+    endpoint: 'data',
+    attempts: 4,
+    call: (ctx) =>
+      getCoopsService().fetchTidePredictions(
+        {
+          station: '9447130',
+          begin_date: '20260916',
+          end_date: '20260916',
+          datum: 'MLLW',
+          time_zone: 'lst_ldt',
+          units: 'english',
+          interval: 'hilo',
+        },
+        ctx,
+      ),
+  },
+  {
+    name: 'fetchWaterLevel',
+    endpoint: 'data',
+    attempts: 4,
+    call: (ctx) =>
+      getCoopsService().fetchWaterLevel(
+        {
+          station: '9447130',
+          begin_date: '20260916',
+          end_date: '20260916',
+          datum: 'MLLW',
+          product: 'water_level',
+          time_zone: 'lst_ldt',
+          units: 'english',
+        },
+        ctx,
+      ),
+  },
+  {
+    name: 'fetchWaterLevelPredictions',
+    endpoint: 'data',
+    attempts: 3,
+    call: (ctx) =>
+      getCoopsService().fetchWaterLevelPredictions(
+        {
+          station: '9447130',
+          begin_date: '20260916',
+          end_date: '20260916',
+          datum: 'MLLW',
+          interval: '6',
+          time_zone: 'lst_ldt',
+          units: 'english',
+        },
+        ctx,
+      ),
+  },
+  {
+    name: 'fetchCurrentPredictions',
+    endpoint: 'data',
+    attempts: 4,
+    call: (ctx) => getCoopsService().fetchCurrentPredictions(CURRENT_PARAMS, ctx),
+  },
+];
+
+/** Settles a call that must reject and hands back what it rejected with. */
+async function rejectionOf(call: Promise<unknown>): Promise<McpError> {
+  try {
+    await call;
+  } catch (error) {
+    return error as McpError;
+  }
+  throw new Error('Expected the call to reject, but it resolved.');
+}
+
+/** A contract carrying the throttle reason, so the service's recovery resolves from it. */
+const THROTTLE_CONTRACT = [
+  {
+    reason: 'upstream_throttled',
+    code: JsonRpcErrorCode.RateLimited,
+    when: 'CO-OPS answered HTTP 403.',
+    recovery: 'Wait a couple of minutes, then retry more slowly.',
+    retryable: true,
+  },
+] as const;
+
+describe.each(REQUEST_SITES)(
+  'CoopsService.$name upstream failures',
+  ({ attempts, call, endpoint }) => {
+    beforeEach(() => {
+      vi.restoreAllMocks();
+      setup();
+    });
+
+    it('maps an HTTP 403 to upstream_throttled after one request, with no upstream body', async () => {
+      const ctx = createMockContext({ errors: THROTTLE_CONTRACT });
+      const http = installCoopsFake(() => new Response('{"message":"Forbidden"}', { status: 403 }));
+      try {
+        const err = await rejectionOf(call(ctx));
+
+        expect(err).toBeInstanceOf(McpError);
+        expect(err.code).toBe(JsonRpcErrorCode.RateLimited);
+        expect(err.data).toMatchObject({
+          reason: 'upstream_throttled',
+          retryable: true,
+          status: 403,
+          recovery: { hint: 'Wait a couple of minutes, then retry more slowly.' },
+        });
+        expect(err.data).not.toHaveProperty('body');
+        expect(err.data).not.toHaveProperty('responseBody');
+        // RateLimited is transient to withRetry, so a mapping inside the retry closure would
+        // re-send into the block. One request means the mapping sits after it.
+        expect(callsTo(http, endpoint)).toHaveLength(1);
+      } finally {
+        http.restore();
+      }
+    });
+
+    it('reads the status before the body, so a 403 carrying a CO-OPS phrase is still the throttle', async () => {
+      const ctx = createMockContext();
+      const http = installCoopsFake(
+        () =>
+          new Response(
+            '{"error": {"message":" Wrong Station ID: Please submit a valid station ID "}}',
+            { status: 403 },
+          ),
+      );
+      try {
+        const err = await rejectionOf(call(ctx));
+
+        expect(err.data).toMatchObject({ reason: 'upstream_throttled' });
+        expect(err).not.toHaveProperty('coopsReason');
+      } finally {
+        http.restore();
+      }
+    });
+
+    it('still retries a 5xx under its withRetry settings and surfaces ServiceUnavailable', async () => {
+      vi.useFakeTimers();
+      const ctx = createMockContext();
+      const http = installCoopsFake(() => new Response('upstream down', { status: 503 }));
+      try {
+        const assertion = expect(call(ctx)).rejects.toMatchObject({
+          code: JsonRpcErrorCode.ServiceUnavailable,
+        });
+        await vi.runAllTimersAsync();
+        await assertion;
+        expect(callsTo(http, endpoint)).toHaveLength(attempts);
+      } finally {
+        http.restore();
+        vi.useRealTimers();
+      }
+    });
+  },
+);

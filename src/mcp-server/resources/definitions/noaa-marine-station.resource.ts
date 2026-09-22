@@ -5,7 +5,7 @@
 
 import { resource, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { getCoopsService } from '@/services/coops/coops-service.js';
+import { getCoopsService, isCoopsThrottled } from '@/services/coops/coops-service.js';
 import { currentPredictionClass, tidePredictionClass } from '@/services/coops/prediction-class.js';
 import { getNdbcService } from '@/services/ndbc/ndbc-service.js';
 
@@ -147,11 +147,21 @@ export const noaaMarineStationResource = resource('noaa-marine://station/{statio
         answered.length > 0
           ? `it is not in the ${answered.join(' or ')} catalog`
           : 'no catalog could be searched';
+      // A throttled CO-OPS catalog clears on its own after a couple of minutes, and retrying
+      // "in a few moments" only re-sends into the block — so the hint names the wait instead.
+      const coopsThrottled =
+        coopsResult.status === 'rejected' && isCoopsThrottled(coopsResult.reason);
       throw ctx.fail(
         'source_unavailable',
         `Station ${params.station_id} could not be resolved: the ${unread.join(' and ')} ${unread.length > 1 ? 'catalogs' : 'catalog'} could not be read, and ${searched}.`,
         {
-          ...ctx.recoveryFor('source_unavailable'),
+          ...(coopsThrottled
+            ? {
+                recovery: {
+                  hint: 'CO-OPS is temporarily refusing requests from this server after a burst of calls. Wait a couple of minutes before reading the station again, and space successive calls rather than sending them back to back.',
+                },
+              }
+            : ctx.recoveryFor('source_unavailable')),
           station_id: params.station_id,
           unread_sources: unread,
         },

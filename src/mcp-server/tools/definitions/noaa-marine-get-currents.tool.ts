@@ -6,7 +6,7 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { getCoopsService, isCoopsBodyError } from '@/services/coops/coops-service.js';
-import { validateCoopsDateRange } from '@/services/coops/date-range.js';
+import { COOPS_DATE_FORM, validateCoopsDateRange } from '@/services/coops/date-range.js';
 import { pageDisclosure, pageNotice, pageRows } from '@/services/coops/row-page.js';
 import type { CoopsCurrent6MinRow, CoopsCurrentRow } from '@/services/coops/types.js';
 
@@ -67,12 +67,12 @@ export const noaaMarineGetCurrents = tool('noaa_marine_get_currents', {
       ),
     begin_date: z
       .string()
-      .regex(/^\d{8}$/)
-      .describe('Start date in YYYYMMDD format, e.g. "20240601".'),
+      .regex(COOPS_DATE_FORM, 'Must be YYYYMMDD or YYYY-MM-DD, e.g. "20240601" or "2024-06-01".')
+      .describe('Start date, YYYYMMDD or YYYY-MM-DD, e.g. "20240601" or "2024-06-01".'),
     end_date: z
       .string()
-      .regex(/^\d{8}$/)
-      .describe('End date in YYYYMMDD format (inclusive), e.g. "20240607".'),
+      .regex(COOPS_DATE_FORM, 'Must be YYYYMMDD or YYYY-MM-DD, e.g. "20240607" or "2024-06-07".')
+      .describe('End date (inclusive), YYYYMMDD or YYYY-MM-DD, e.g. "20240607" or "2024-06-07".'),
     time_zone: z
       .enum(['lst_ldt', 'gmt', 'lst'])
       .default('lst_ldt')
@@ -252,7 +252,7 @@ export const noaaMarineGetCurrents = tool('noaa_marine_get_currents', {
       code: JsonRpcErrorCode.ValidationError,
       when: 'begin_date/end_date is not a real calendar date or begin_date is after end_date',
       recovery:
-        'Provide begin_date and end_date as real YYYYMMDD calendar dates with begin_date on or before end_date.',
+        'Provide begin_date and end_date as real calendar dates, each as YYYYMMDD or YYYY-MM-DD, with begin_date on or before end_date.',
     },
     {
       reason: 'date_range_exceeded',
@@ -280,6 +280,15 @@ export const noaaMarineGetCurrents = tool('noaa_marine_get_currents', {
       when: 'CO-OPS rejected the requested bin because the station publishes no predictions at that bin.',
       recovery:
         'Read the bins[] array on the station row from noaa_marine_find_stations and retry with one of those bin numbers, or omit bin to take the shallowest.',
+    },
+    {
+      reason: 'upstream_throttled',
+      code: JsonRpcErrorCode.RateLimited,
+      when: 'CO-OPS answered HTTP 403, which it returns for about two minutes while it throttles a burst of requests from one address.',
+      recovery:
+        'The block is temporary. Wait a couple of minutes before calling again, and space successive CO-OPS calls rather than sending them back to back.',
+      retryable: true,
+      thrownBy: 'service',
     },
   ],
 
@@ -309,8 +318,8 @@ export const noaaMarineGetCurrents = tool('noaa_marine_get_currents', {
       svc.fetchCurrentPredictions(
         {
           station: input.station_id,
-          begin_date: input.begin_date,
-          end_date: input.end_date,
+          begin_date: range.beginDate,
+          end_date: range.endDate,
           time_zone: input.time_zone,
           units: input.units,
           interval: input.interval,

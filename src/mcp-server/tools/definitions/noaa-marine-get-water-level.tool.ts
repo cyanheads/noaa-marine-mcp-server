@@ -5,8 +5,12 @@
 
 import { type Context, tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { getCoopsService, isCoopsBodyError } from '@/services/coops/coops-service.js';
-import { validateCoopsDateRange } from '@/services/coops/date-range.js';
+import {
+  getCoopsService,
+  isCoopsBodyError,
+  isCoopsThrottled,
+} from '@/services/coops/coops-service.js';
+import { COOPS_DATE_FORM, validateCoopsDateRange } from '@/services/coops/date-range.js';
 import { pageDisclosure, pageNotice, pagePairedRows } from '@/services/coops/row-page.js';
 import type { CoopsPredictionRow } from '@/services/coops/types.js';
 
@@ -118,12 +122,12 @@ export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
       ),
     begin_date: z
       .string()
-      .regex(/^\d{8}$/)
-      .describe('Start date in YYYYMMDD format, e.g. "20240601".'),
+      .regex(COOPS_DATE_FORM, 'Must be YYYYMMDD or YYYY-MM-DD, e.g. "20240601" or "2024-06-01".')
+      .describe('Start date, YYYYMMDD or YYYY-MM-DD, e.g. "20240601" or "2024-06-01".'),
     end_date: z
       .string()
-      .regex(/^\d{8}$/)
-      .describe('End date in YYYYMMDD format (inclusive), e.g. "20240601".'),
+      .regex(COOPS_DATE_FORM, 'Must be YYYYMMDD or YYYY-MM-DD, e.g. "20240601" or "2024-06-01".')
+      .describe('End date (inclusive), YYYYMMDD or YYYY-MM-DD, e.g. "20240601" or "2024-06-01".'),
     datum: z
       .enum([
         'MLLW',
@@ -241,12 +245,12 @@ export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
         max_surge: z
           .number()
           .describe(
-            'Maximum positive residual (observed − predicted) in the requested units (feet for english, meters for metric) — storm surge indicator.',
+            'Maximum positive residual (observed − predicted) in the requested units (feet for english, meters for metric) — storm surge indicator. 0 when the observed level never rose above prediction in the range.',
           ),
         max_drawdown: z
           .number()
           .describe(
-            'Maximum negative residual magnitude in the requested units (feet for english, meters for metric) — anomalous drawdown indicator.',
+            'Maximum negative residual magnitude in the requested units (feet for english, meters for metric) — anomalous drawdown indicator. 0 when the observed level never fell below prediction in the range.',
           ),
       })
       .optional()
@@ -325,7 +329,7 @@ export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
       code: JsonRpcErrorCode.ValidationError,
       when: 'begin_date/end_date is not a real calendar date or begin_date is after end_date',
       recovery:
-        'Provide begin_date and end_date as real YYYYMMDD calendar dates with begin_date on or before end_date.',
+        'Provide begin_date and end_date as real calendar dates, each as YYYYMMDD or YYYY-MM-DD, with begin_date on or before end_date.',
     },
     {
       reason: 'date_range_exceeded',
@@ -361,6 +365,15 @@ export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
       when: 'The station does not carry the requested datum — a Great Lakes station has no tidal datum, and NAVD reads only where the station has an NAVD88 tie.',
       recovery:
         'Retry with a datum this station carries — STND reads any station, and the runtime hint names the specific planes available here.',
+    },
+    {
+      reason: 'upstream_throttled',
+      code: JsonRpcErrorCode.RateLimited,
+      when: 'CO-OPS answered the observed-series request with HTTP 403, which it returns for about two minutes while it throttles a burst of requests from one address.',
+      recovery:
+        'The block is temporary. Wait a couple of minutes before calling again, and space successive CO-OPS calls rather than sending them back to back.',
+      retryable: true,
+      thrownBy: 'service',
     },
   ],
 
@@ -407,8 +420,8 @@ export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
 
     const params = {
       station: input.station_id,
-      begin_date: input.begin_date,
-      end_date: input.end_date,
+      begin_date: range.beginDate,
+      end_date: range.endDate,
       datum: input.datum,
       time_zone: input.time_zone,
       units: input.units,
@@ -559,8 +572,13 @@ export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
         );
       } else if (predErr) {
         ctx.enrich({ predictions_status: 'unavailable' });
+        // A throttled fetch clears on its own after a couple of minutes; an immediate retry
+        // only re-sends into the block, so the notice names the wait instead.
+        const nextStep = isCoopsThrottled(predErr)
+          ? 'CO-OPS is temporarily refusing requests from this server after a burst of calls, so wait a couple of minutes before retrying for the comparison series, and space successive calls.'
+          : 'Retry to obtain the comparison series.';
         notices.push(
-          `The tide-prediction fetch for station ${input.station_id} failed, so no prediction series is available to compare against and no residual could be computed. The observed series is complete. Retry to obtain the comparison series.`,
+          `The tide-prediction fetch for station ${input.station_id} failed, so no prediction series is available to compare against and no residual could be computed. The observed series is complete. ${nextStep}`,
         );
       } else {
         ctx.enrich({ predictions_status: 'empty' });
@@ -583,6 +601,10 @@ export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
      * on high_low: observed extremes fall minutes off the predicted ones, so the join would
      * land on a small fraction of the events and report a surge figure drawn from that
      * fraction. Those cadences report no residual and say so in the notice instead.
+     *
+     * Both sides clamp at zero: a window that sat above prediction throughout had no
+     * drawdown, and one that sat below had no surge, so the side that never occurred reads 0
+     * rather than the signed residual nearest to it.
      */
     let residualSummary: { max_surge: number; max_drawdown: number } | undefined;
     if (spec.residual && predictions.length > 0) {
@@ -593,8 +615,8 @@ export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
         if (pred !== undefined && Number.isFinite(pred)) residuals.push(obs.value - pred);
       }
       if (residuals.length > 0) {
-        const maxSurge = Math.max(...residuals);
-        const maxDrawdown = Math.abs(Math.min(...residuals));
+        const maxSurge = Math.max(0, ...residuals);
+        const maxDrawdown = Math.max(0, -Math.min(...residuals));
         residualSummary = {
           max_surge: Math.round(maxSurge * 100) / 100,
           max_drawdown: Math.round(maxDrawdown * 100) / 100,
