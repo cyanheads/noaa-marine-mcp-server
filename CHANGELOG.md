@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.6.0](changelog/0.6.x/0.6.0.md) — 2026-09-22
+
+New noaa_marine_get_monthly_means tool, window-based verified_data_lag fix
+
 ## [0.5.2](changelog/0.5.x/0.5.2.md) — 2026-09-22
 
 Derived state for stateless CO-OPS stations, truncation notice fix
