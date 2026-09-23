@@ -1,7 +1,7 @@
 <div align="center">
   <h1>@cyanheads/noaa-marine-mcp-server</h1>
   <p><b>Find NOAA tide stations and NDBC buoys, fetch tide predictions, water levels, tidal currents, and live buoy conditions via MCP. STDIO or Streamable HTTP.</b>
-  <div>7 Tools • 1 Resource</div>
+  <div>8 Tools • 1 Resource</div>
   </p>
 </div>
 
@@ -38,6 +38,7 @@ US tide, current, and buoy data from NOAA CO-OPS and NDBC. Find tide, water-leve
 | `noaa_marine_find_stations` | Find CO-OPS tide/water-level/current stations and NDBC buoys by location, name, state, or data capability. |
 | `noaa_marine_get_tide_predictions` | High/low tide predictions or a 6-minute curve for a CO-OPS tide station. |
 | `noaa_marine_get_water_level` | Observed water level at a 6-minute, hourly, high/low, or daily-mean cadence, paired with predictions and a storm-surge residual summary. |
+| `noaa_marine_get_monthly_means` | Verified monthly tidal datums and extremes for a CO-OPS water-level station — the record for sea-level and tidal-range trends. |
 | `noaa_marine_get_currents` | CO-OPS tidal current predictions — max flood/ebb/slack events or a 6-minute curve. |
 | `noaa_marine_get_conditions` | Live NDBC buoy conditions: waves, wind, sea-surface and air temperature, pressure. |
 | `noaa_marine_get_current_profile` | Observed ocean-current depth profile from an NDBC ADCP buoy. |
@@ -91,7 +92,18 @@ All resource data is also reachable via tools — use `noaa_marine_find_stations
 - `residual_summary` (max surge, max drawdown) only when both series are present, computed from the finite observed/predicted pairs across the whole matched series rather than the returned page. Each side clamps at zero, so a window that stayed above prediction reports `max_drawdown: 0` and one that stayed below reports `max_surge: 0`. Reported on `6min` and `hourly` only — observed high and low waters do not occur at the predicted extreme times, so a `high_low` join would rest on a small fraction of the events, and `daily_mean` has no paired series at all; the notice says which applies
 - A range whose rows fit the response budget returns whole; a longer one returns the leading rows as a page, with `rows_matched`, `rows_returned`, `page_offset`, and `next_offset` on both consumption surfaces. Observations carry the `offset` and the paired predictions follow by time window, so a page's two series always describe one span even after gap rows shorten the observed one
 - `daily_mean` is requested in local standard time whatever `time_zone` was passed — CO-OPS serves that product in LST only and silently shifts any other zone by a day
-- Typed `date_range_exceeded`, `invalid_date_range`, `station_not_found`, `no_data`, `datum_unavailable`, `great_lakes_only` (`daily_mean` at a coastal station), `verified_data_lag`, and `upstream_throttled` errors — `verified_data_lag` for a window CO-OPS has not verified yet, since it verifies the coarser products monthly for the prior month, and `upstream_throttled` for the HTTP 403 CO-OPS answers a burst of requests with (a 403 on the paired prediction fetch alone leaves `predictions_status: "unavailable"` instead, with a notice naming the wait)
+- Typed `date_range_exceeded`, `invalid_date_range`, `station_not_found`, `no_data`, `datum_unavailable`, `great_lakes_only` (`daily_mean` at a coastal station), `verified_data_lag`, and `upstream_throttled` errors — `verified_data_lag` for an `hourly`, `high_low`, or `daily_mean` window ending on or after the first day of the prior month, which CO-OPS may not have verified yet since it verifies the coarser products monthly for the prior month (an earlier window it answers the same way is `no_data`, since waiting cannot help it), and `upstream_throttled` for the HTTP 403 CO-OPS answers a burst of requests with (a 403 on the paired prediction fetch alone leaves `predictions_status: "unavailable"` instead, with a notice naming the wait)
+
+---
+
+### `noaa_marine_get_monthly_means` <sub>tool</sub>
+
+- One row per station-month of the CO-OPS `monthly_mean` product: the month's `highest` and `lowest` water, its tidal datums (`mhhw`, `mhw`, `msl`, `mtl`, `mlw`, `mllw`, `dtl`), ranges (`gt`, `mn`, `dhq`, `dlq`), lunitidal intervals in hours (`hwi`, `lwi`), and CO-OPS's `inferred` code passed through verbatim — a code (`0`, `1`, `11` observed), not a boolean
+- Heights are relative to the requested datum — eleven reference planes: MLLW (default), MHHW, MHW, MTL, MSL, MLW, NAVD, STND, IGLD and LWD (Great Lakes only), CRD (Columbia River only) — in `english` feet or `metric` meters. The ranges (`gt`, `mn`, `dhq`, `dlq`) are differences between two planes, so they read the same under every datum. A value CO-OPS publishes as an empty string is omitted, never zeroed — a Great Lakes station at `IGLD` carries only `highest`, `msl`, and `lowest`
+- `begin_date`/`end_date` as `YYYYMMDD` or `YYYY-MM-DD`, spanning up to 73,000 days (the ceiling CO-OPS names), rejected locally before the call. The months the two dates fall in are the first and last returned; CO-OPS answers one month past `end_date`, and that month is dropped
+- A range whose months fit the response budget returns whole; a longer one — decades of months — returns the leading months as a page with `rows_matched`, `rows_returned`, `page_offset`, and `next_offset`. Walk it with `offset`; an `offset` past the last month is an empty page rather than an error
+- Typed `invalid_date_range`, `date_range_exceeded`, `station_not_found`, `datum_unavailable`, `verified_data_lag`, `no_data`, and `upstream_throttled` errors. CO-OPS answers an unpublished window with one sentence whatever the cause, so a window ending on or after the first day of the prior month is `verified_data_lag` and any earlier one is `no_data`
+- Returns the monthly record, not a trend — fitting one is left to the caller
 
 ---
 
@@ -330,7 +342,7 @@ The Dockerfile defaults to HTTP transport, stateless session mode, and logs to `
 | `src/config/` | `NOAA_APPLICATION_ID` env var parsing with Zod. |
 | `src/services/coops/` | CO-OPS Tides & Currents API client: station list cache, data fetch, error detection. |
 | `src/services/ndbc/` | NDBC buoy service: active stations XML parser, realtime text parser. |
-| `src/mcp-server/tools/` | Seven tool definitions (`*.tool.ts`). |
+| `src/mcp-server/tools/` | Eight tool definitions (`*.tool.ts`). |
 | `src/mcp-server/resources/` | Station metadata resource (`noaa-marine-station.resource.ts`). |
 | `tests/` | Vitest tests mirroring `src/`. |
 | `docs/` | Design doc and directory tree. |

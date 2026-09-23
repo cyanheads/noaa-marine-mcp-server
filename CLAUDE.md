@@ -235,7 +235,7 @@ src/
   services/
     coops/
       coops-service.ts                  # CO-OPS Tides & Currents API (station cache, resolved-state cache, data fetch, message classifier, 403 throttle mapping)
-      date-range.ts                     # YYYYMMDD / YYYY-MM-DD calendar validation, compaction, and span, shared by the date-ranged tools
+      date-range.ts                     # YYYYMMDD / YYYY-MM-DD calendar validation, compaction, and span, shared by the date-ranged tools; the verification-lag window rule
       prediction-class.ts               # Decodes the catalog `type` letter into a prediction class
       row-page.ts                       # Byte-bounded row paging shared by the time-series tools
       station-state.ts                  # State codes; resolves each station's state (published, else nearest state-bearing row within 25 km)
@@ -249,6 +249,7 @@ src/
       noaa-marine-find-stations.tool.ts        # noaa_marine_find_stations
       noaa-marine-get-tide-predictions.tool.ts # noaa_marine_get_tide_predictions
       noaa-marine-get-water-level.tool.ts      # noaa_marine_get_water_level
+      noaa-marine-get-monthly-means.tool.ts    # noaa_marine_get_monthly_means
       noaa-marine-get-currents.tool.ts         # noaa_marine_get_currents
       noaa-marine-get-conditions.tool.ts       # noaa_marine_get_conditions
       noaa-marine-get-current-profile.tool.ts  # noaa_marine_get_current_profile
