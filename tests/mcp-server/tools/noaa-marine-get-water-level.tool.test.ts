@@ -5,9 +5,15 @@
 
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import { noaaMarineGetWaterLevel } from '@/mcp-server/tools/definitions/noaa-marine-get-water-level.tool.js';
 import { initCoopsService } from '@/services/coops/coops-service.js';
+import {
+  type CoopsResponder,
+  callsTo,
+  healthyCoops,
+  installCoopsFake,
+} from '../../support/coops-http.js';
 
 const OBS_ROWS = [
   { t: '2025-01-15 12:00', v: '8.23', s: '0.01', f: '0,0,0,0', q: 'p' },
@@ -1233,6 +1239,12 @@ describe('noaaMarineGetWaterLevel', () => {
     });
 
     it('names the verified-data lag when a coarse product has not been published for the window', async () => {
+      // The window ends inside the prior month relative to this pinned "today".
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(new Date('2026-09-22T12:00:00Z'));
+      onTestFinished(() => {
+        vi.useRealTimers();
+      });
       const { CoopsBodyError, getCoopsService } = await import('@/services/coops/coops-service.js');
       const svc = getCoopsService();
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1310,6 +1322,146 @@ describe('noaaMarineGetWaterLevel', () => {
       expect(structured.rows_matched).toBe(8760);
       expect((structured.observations as unknown[]).length).toBeLessThan(8760);
       expect(structured.truncated).toBe(true);
+    });
+  });
+
+  // --- #41: the "may not be offered" sentence is decided by window, not by the sentence alone ---
+
+  describe('product not offered for the window', () => {
+    /** "Today" for every case below — the prior month starts 2026-08-01. */
+    const TODAY = new Date('2026-09-22T12:00:00Z');
+    const NOT_OFFERED = Response.json({
+      error: {
+        message:
+          'No data was found. This product may not be offered at this station at the requested time.',
+      },
+    });
+
+    /** CO-OPS answering the observed product with the "may not be offered" sentence. */
+    function notOffered(product: string): CoopsResponder {
+      return (endpoint, url) =>
+        endpoint === 'data' && url.searchParams.get('product') === product
+          ? NOT_OFFERED.clone()
+          : healthyCoops(endpoint, url);
+    }
+
+    type Result = Awaited<ReturnType<typeof runToolContract>>;
+    type ErrorEnvelope = { code: number; data?: Record<string, unknown>; message: string };
+    const errorOf = (r: Result) => (r.structuredContent as { error: ErrorEnvelope }).error;
+    const textOf = (r: Result) =>
+      r.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
+    const hintOf = (r: Result) =>
+      (errorOf(r).data?.recovery as { hint?: string } | undefined)?.hint ?? '';
+
+    let http: ReturnType<typeof installCoopsFake> | undefined;
+
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(TODAY);
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+      http?.restore();
+      http = undefined;
+    });
+
+    it('fails no_data for an 1850 hourly window, which predates the station record', async () => {
+      http = installCoopsFake(notOffered('hourly_height'));
+      const result = await runToolContract(noaaMarineGetWaterLevel, {
+        station_id: '9447130',
+        begin_date: '18500101',
+        end_date: '18500131',
+        interval: 'hourly',
+      });
+      const error = errorOf(result);
+
+      expect(result.isError).toBe(true);
+      expect(error.code).toBe(JsonRpcErrorCode.NotFound);
+      expect(error.data?.reason).toBe('no_data');
+      // Waiting for verification cannot help a window this old, so the recovery never says to.
+      expect(hintOf(result)).not.toContain('verif');
+      expect(hintOf(result)).toContain('later window');
+      expect(textOf(result)).toContain('(reason no_data');
+      expect(textOf(result)).toContain(`Recovery: ${hintOf(result)}`);
+
+      const observed = callsTo(http, 'data').find(
+        (u) => u.searchParams.get('product') === 'hourly_height',
+      );
+      expect(observed?.searchParams.get('begin_date')).toBe('18500101');
+    });
+
+    it('fails no_data for a coarse window ending the day before the prior month', async () => {
+      http = installCoopsFake(notOffered('high_low'));
+      const result = await runToolContract(noaaMarineGetWaterLevel, {
+        station_id: '9447130',
+        begin_date: '2026-07-01',
+        end_date: '2026-07-31',
+        interval: 'high_low',
+      });
+
+      expect(errorOf(result).data?.reason).toBe('no_data');
+    });
+
+    it.each([
+      ['hourly', 'hourly_height', '20260801', '20260801'],
+      ['high_low', 'high_low', '20260815', '20260910'],
+      ['hourly', 'hourly_height', '20260901', '20260922'],
+    ] as const)(
+      'keeps verified_data_lag for %s ending %s–%s, on or after the prior month',
+      async (interval, product, begin, end) => {
+        http = installCoopsFake(notOffered(product));
+        const result = await runToolContract(noaaMarineGetWaterLevel, {
+          station_id: '9447130',
+          begin_date: begin,
+          end_date: end,
+          interval,
+        });
+        const error = errorOf(result);
+
+        expect(error.code).toBe(JsonRpcErrorCode.NotFound);
+        expect(error.data?.reason).toBe('verified_data_lag');
+        expect(hintOf(result)).toContain('verif');
+        expect(textOf(result)).toContain('(reason verified_data_lag');
+      },
+    );
+
+    it('keeps verified_data_lag for a daily_mean window reaching into the current month', async () => {
+      http = installCoopsFake((endpoint) =>
+        endpoint === 'catalog'
+          ? Response.json({
+              stations: [
+                {
+                  id: '9087044',
+                  name: 'Calumet Harbor',
+                  lat: 41.73,
+                  lng: -87.54,
+                  greatlakes: true,
+                },
+              ],
+            })
+          : NOT_OFFERED.clone(),
+      );
+      const result = await runToolContract(noaaMarineGetWaterLevel, {
+        station_id: '9087044',
+        begin_date: '20260801',
+        end_date: '20260915',
+        interval: 'daily_mean',
+        datum: 'IGLD',
+      });
+
+      expect(errorOf(result).data?.reason).toBe('verified_data_lag');
+    });
+
+    it('leaves 6min unchanged: the sentence is no_data whatever the window', async () => {
+      http = installCoopsFake(notOffered('water_level'));
+      const result = await runToolContract(noaaMarineGetWaterLevel, {
+        station_id: '9447130',
+        begin_date: '20260915',
+        end_date: '20260916',
+      });
+
+      expect(errorOf(result).data?.reason).toBe('no_data');
     });
   });
 });

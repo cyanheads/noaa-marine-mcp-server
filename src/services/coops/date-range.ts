@@ -1,6 +1,7 @@
 /**
  * @fileoverview Strict calendar-date range validation shared by the CO-OPS date tools
- *   (tide predictions, water level, currents).
+ *   (tide predictions, water level, monthly means, currents), and the verification-lag window
+ *   rule the verified-product tools share.
  * @module services/coops/date-range
  *
  * The tools accept each date as `YYYYMMDD` or `YYYY-MM-DD`; CO-OPS takes `YYYYMMDD`. The
@@ -13,7 +14,7 @@
  * which the tools then mislabel as `station_not_found`. This validator rejects those
  * locally before any upstream call, and rejects reversed ranges (begin after end).
  * It deliberately does not enforce a maximum span: each tool keeps its own limit
- * (365 days for predictions/currents, 31 for 6-minute water level).
+ * (365 days for predictions/currents, 31 for 6-minute water level, 73,000 for monthly means).
  */
 
 /** Parsed range plus its span in whole days (both endpoints at midnight UTC). */
@@ -65,6 +66,20 @@ function parseCalendarDate(s: string): { compact: string; date: Date } | null {
   const compact = s.replaceAll('-', '');
   const date = parseYyyymmdd(compact);
   return date ? { compact, date } : null;
+}
+
+/**
+ * Whether a window ending on `end` can still be waiting for CO-OPS verification.
+ *
+ * CO-OPS verifies its coarser products monthly, for the prior month, and answers an unverified
+ * window with the same `may not be offered at this station at the requested time` sentence it
+ * sends for a window before the station's record begins. The window's end is what separates
+ * the two: one ending on or after the first day of the prior month (UTC) may not be verified
+ * yet, and any earlier one had its chance to be. `now` is injectable so the boundary is testable.
+ */
+export function awaitsVerification(end: Date, now: Date = new Date()): boolean {
+  const priorMonthStart = Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1);
+  return end.getTime() >= priorMonthStart;
 }
 
 /**

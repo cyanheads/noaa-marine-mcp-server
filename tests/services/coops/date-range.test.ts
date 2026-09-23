@@ -1,10 +1,10 @@
 /**
- * @fileoverview Tests for the shared CO-OPS date-range validator.
+ * @fileoverview Tests for the shared CO-OPS date-range validator and verification-lag window rule.
  * @module tests/services/coops/date-range.test
  */
 
-import { describe, expect, it } from 'vitest';
-import { validateCoopsDateRange } from '@/services/coops/date-range.js';
+import { describe, expect, it, vi } from 'vitest';
+import { awaitsVerification, validateCoopsDateRange } from '@/services/coops/date-range.js';
 
 describe('validateCoopsDateRange', () => {
   it('accepts a valid same-day range with span 0', () => {
@@ -103,5 +103,44 @@ describe('validateCoopsDateRange', () => {
     const result = validateCoopsDateRange('2025-01-10', '20250101');
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error).toContain('"2025-01-10" is after end_date "20250101"');
+  });
+});
+
+describe('awaitsVerification', () => {
+  const day = (iso: string) => new Date(`${iso}T00:00:00Z`);
+  const NOW = new Date('2026-09-22T12:00:00Z');
+
+  it('is true for a window ending on the first day of the prior month', () => {
+    expect(awaitsVerification(day('2026-08-01'), NOW)).toBe(true);
+  });
+
+  it('is false for a window ending the day before the prior month', () => {
+    expect(awaitsVerification(day('2026-07-31'), NOW)).toBe(false);
+  });
+
+  it('is true for a window ending in the current month or the future', () => {
+    expect(awaitsVerification(day('2026-09-22'), NOW)).toBe(true);
+    expect(awaitsVerification(day('2027-01-01'), NOW)).toBe(true);
+  });
+
+  it('is false for a window centuries before the station record', () => {
+    expect(awaitsVerification(day('1850-01-31'), NOW)).toBe(false);
+  });
+
+  it('crosses the year boundary in January, whose prior month is December', () => {
+    const january = new Date('2027-01-05T08:00:00Z');
+    expect(awaitsVerification(day('2026-12-01'), january)).toBe(true);
+    expect(awaitsVerification(day('2026-11-30'), january)).toBe(false);
+  });
+
+  it('reads the clock when no now is given', () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(NOW);
+    try {
+      expect(awaitsVerification(day('2026-08-01'))).toBe(true);
+      expect(awaitsVerification(day('2026-07-31'))).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

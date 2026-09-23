@@ -10,7 +10,11 @@ import {
   isCoopsBodyError,
   isCoopsThrottled,
 } from '@/services/coops/coops-service.js';
-import { COOPS_DATE_FORM, validateCoopsDateRange } from '@/services/coops/date-range.js';
+import {
+  awaitsVerification,
+  COOPS_DATE_FORM,
+  validateCoopsDateRange,
+} from '@/services/coops/date-range.js';
 import { pageDisclosure, pageNotice, pagePairedRows } from '@/services/coops/row-page.js';
 import type { CoopsPredictionRow } from '@/services/coops/types.js';
 
@@ -117,8 +121,7 @@ export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
       .string()
       .regex(/^[A-Za-z0-9_-]{1,20}$/)
       .describe(
-        'CO-OPS water-level station ID (numeric, e.g. "9447130" for Seattle). ' +
-          'Obtain from noaa_marine_find_stations with types=["water_level"].',
+        'CO-OPS water-level station ID (numeric, e.g. "9447130" for Seattle). Obtain from noaa_marine_find_stations with types=["water_level"].',
       ),
     begin_date: z
       .string()
@@ -341,9 +344,9 @@ export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
     {
       reason: 'no_data',
       code: JsonRpcErrorCode.NotFound,
-      when: 'Station exists but no observed water-level data for the date range.',
+      when: 'Station exists but no observed water-level data for the date range — including an hourly, high_low, or daily_mean window ending before the prior month, which is not a verification lag.',
       recovery:
-        'The station may be offline or the date range may be in the future. Try a different date range or station.',
+        'The station may be offline, its record may begin after the window, or the window may be in the future. Try a different date range or station.',
     },
     {
       reason: 'great_lakes_only',
@@ -355,9 +358,9 @@ export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
     {
       reason: 'verified_data_lag',
       code: JsonRpcErrorCode.NotFound,
-      when: 'The hourly, high_low, or daily_mean product returned no rows for the window, which CO-OPS has not published yet.',
+      when: 'The hourly, high_low, or daily_mean product returned no rows for a window ending on or after the first day of the prior month, which CO-OPS may not have verified yet.',
       recovery:
-        'CO-OPS verifies these products monthly, for the prior month, so request a window ending before the first day of the current month — or use interval "6min", whose preliminary data reaches the present.',
+        'CO-OPS verifies these products monthly, for the prior month, so request a window ending before the first day of the prior month — or use interval "6min", whose preliminary data reaches the present.',
     },
     {
       reason: 'datum_unavailable',
@@ -463,16 +466,28 @@ export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
           );
         }
         /*
-         * CO-OPS says a product "may not be offered at this station at the requested time" for
-         * two conditions. On a coarser product the usual one is the verification lag — it
-         * verifies those monthly, for the prior month — so the recovery names the lag rather
-         * than sending the caller after an outage or a future date that is not the cause.
+         * CO-OPS says a product "may not be offered at this station at the requested time" both
+         * for a coarser-product window it has not verified yet — it verifies those monthly, for
+         * the prior month — and for a window before the station's record begins. The window
+         * separates them: one ending on or after the first day of the prior month may still be
+         * waiting on verification, and an earlier one never will be, so waiting cannot help it.
          */
         if (err.coopsReason === 'product_not_offered' && input.interval !== '6min') {
+          if (awaitsVerification(range.end)) {
+            throw ctx.fail(
+              'verified_data_lag',
+              `CO-OPS has published no ${input.interval} data for station ${input.station_id} in the requested window.`,
+              { ...ctx.recoveryFor('verified_data_lag') },
+            );
+          }
           throw ctx.fail(
-            'verified_data_lag',
-            `CO-OPS has published no ${input.interval} data for station ${input.station_id} in the requested window.`,
-            { ...ctx.recoveryFor('verified_data_lag') },
+            'no_data',
+            `CO-OPS has no ${input.interval} data for station ${input.station_id} in a window ending ${input.end_date}. The window ends before the prior month, so it is not waiting on CO-OPS's monthly verification.`,
+            {
+              recovery: {
+                hint: `The station's ${input.interval} record may begin after this window, or an outage may cover it. Request a later window for station ${input.station_id}.`,
+              },
+            },
           );
         }
         // Every other reason is an absence of observations, not a rejected request.
