@@ -57,7 +57,7 @@ const height = (what: string) =>
       `${what}, in the requested units relative to the requested datum. Omitted when CO-OPS publishes no value for the month.`,
     );
 
-const range = (what: string) =>
+const planeDifference = (what: string) =>
   z
     .number()
     .optional()
@@ -148,10 +148,10 @@ export const noaaMarineGetMonthlyMeans = tool('noaa_marine_get_monthly_means', {
             mlw: height("The month's mean low water (MLW)"),
             mllw: height("The month's mean lower low water (MLLW)"),
             dtl: height("The month's mean diurnal tide level (DTL)"),
-            gt: range('Great diurnal range, MHHW − MLLW (GT)'),
-            mn: range('Mean range of tide, MHW − MLW (MN)'),
-            dhq: range('Mean diurnal high water inequality, MHHW − MHW (DHQ)'),
-            dlq: range('Mean diurnal low water inequality, MLW − MLLW (DLQ)'),
+            gt: planeDifference('Great diurnal range, MHHW − MLLW (GT)'),
+            mn: planeDifference('Mean range of tide, MHW − MLW (MN)'),
+            dhq: planeDifference('Mean diurnal high water inequality, MHHW − MHW (DHQ)'),
+            dlq: planeDifference('Mean diurnal low water inequality, MLW − MLLW (DLQ)'),
             hwi: lunitidal('Greenwich high water interval (HWI)'),
             lwi: lunitidal('Greenwich low water interval (LWI)'),
             lowest: height("The month's lowest observed water level"),
