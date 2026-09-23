@@ -20,6 +20,7 @@ import type {
   CoopsCurrentRow,
   CoopsDataRow,
   CoopsErrorResponse,
+  CoopsMonthlyMeanRow,
   CoopsPredictionRow,
   CoopsStation,
   CoopsStationListResponse,
@@ -423,6 +424,54 @@ export class CoopsService {
       },
       {
         operation: 'CoopsService.fetchWaterLevel',
+        context: ctx,
+        baseDelayMs: 1000,
+        maxRetries: 3,
+        signal: ctx.signal,
+      },
+    ).catch((err: unknown) => this.rethrowClassified(err, ctx, params.datum));
+  }
+
+  /**
+   * Fetch the `monthly_mean` product: one row per station-month of tidal datums and extremes.
+   *
+   * CO-OPS rejects the product without a `time_zone` (HTTP 400), and with `lst` it answers one
+   * month past `end_date` — the caller drops that overrun month by its `year`/`month`, which is
+   * the only calendar the rows carry. Sent as `lst` here, at the transport that knows the rule.
+   */
+  async fetchMonthlyMeans(
+    params: {
+      station: string;
+      begin_date: string;
+      end_date: string;
+      datum: string;
+      units: string;
+    },
+    ctx: Context,
+  ): Promise<{ data: CoopsMonthlyMeanRow[]; stationName: string }> {
+    return await withRetry(
+      async () => {
+        const url = this.buildDataUrl({
+          station: params.station,
+          product: 'monthly_mean',
+          begin_date: params.begin_date,
+          end_date: params.end_date,
+          datum: params.datum,
+          time_zone: 'lst',
+          units: params.units,
+          format: 'json',
+        });
+        const response = await fetchWithTimeout(url, 20_000, ctx, {
+          signal: ctx.signal,
+        });
+        const text = await response.text();
+        this.detectHtmlError(text);
+        const parsed = JSON.parse(text);
+        this.checkCoopsError(parsed, params.datum);
+        return { data: parsed.data ?? [], stationName: parsed.metadata?.name ?? params.station };
+      },
+      {
+        operation: 'CoopsService.fetchMonthlyMeans',
         context: ctx,
         baseDelayMs: 1000,
         maxRetries: 3,

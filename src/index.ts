@@ -11,6 +11,7 @@ import { noaaMarineFindStations } from './mcp-server/tools/definitions/noaa-mari
 import { noaaMarineGetConditions } from './mcp-server/tools/definitions/noaa-marine-get-conditions.tool.js';
 import { noaaMarineGetCurrentProfile } from './mcp-server/tools/definitions/noaa-marine-get-current-profile.tool.js';
 import { noaaMarineGetCurrents } from './mcp-server/tools/definitions/noaa-marine-get-currents.tool.js';
+import { noaaMarineGetMonthlyMeans } from './mcp-server/tools/definitions/noaa-marine-get-monthly-means.tool.js';
 import { noaaMarineGetOceanObservations } from './mcp-server/tools/definitions/noaa-marine-get-ocean-observations.tool.js';
 import { noaaMarineGetTidePredictions } from './mcp-server/tools/definitions/noaa-marine-get-tide-predictions.tool.js';
 import { noaaMarineGetWaterLevel } from './mcp-server/tools/definitions/noaa-marine-get-water-level.tool.js';
@@ -25,6 +26,7 @@ await createApp({
     noaaMarineFindStations,
     noaaMarineGetTidePredictions,
     noaaMarineGetWaterLevel,
+    noaaMarineGetMonthlyMeans,
     noaaMarineGetCurrents,
     noaaMarineGetConditions,
     noaaMarineGetCurrentProfile,

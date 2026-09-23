@@ -193,8 +193,7 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
       .max(90)
       .optional()
       .describe(
-        'Center latitude in decimal degrees for proximity search. Required together with longitude — ' +
-          'supplying only one is rejected rather than silently ignored. Optionally pair with radius_km.',
+        'Center latitude in decimal degrees for proximity search. Required together with longitude — supplying only one is rejected rather than silently ignored. Optionally pair with radius_km.',
       ),
     longitude: z
       .number()
@@ -202,8 +201,7 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
       .max(180)
       .optional()
       .describe(
-        'Center longitude in decimal degrees for proximity search. Required together with latitude — ' +
-          'supplying only one is rejected rather than silently ignored. Optionally pair with radius_km.',
+        'Center longitude in decimal degrees for proximity search. Required together with latitude — supplying only one is rejected rather than silently ignored. Optionally pair with radius_km.',
       ),
     radius_km: z
       .number()
@@ -217,19 +215,13 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
       .string()
       .optional()
       .describe(
-        'Station name or station ID substring to match, case-insensitive, on both sources. ' +
-          'E.g. "seattle", "puget sound", "9447130", "46041". A station whose ID matches exactly is ' +
-          'returned ahead of name matches, unless latitude/longitude were supplied — a proximity ' +
-          'search orders by distance instead. Blank or whitespace-only values are treated as omitted.',
+        'Station name or station ID substring to match, case-insensitive, on both sources. E.g. "seattle", "puget sound", "9447130", "46041". A station whose ID matches exactly is returned ahead of name matches, unless latitude/longitude were supplied — a proximity search orders by distance instead. Blank or whitespace-only values are treated as omitted.',
       ),
     state: z
       .enum(STATE_CODES)
       .optional()
       .describe(
-        'Filter by 2-letter US state or territory code. Applies to CO-OPS stations only — ' +
-          'providing it restricts results to CO-OPS and excludes NDBC buoys (which carry no state). ' +
-          'A station matches on its own catalog code, or — when its catalog rows carry none, as with every current station — on the state of the nearest state-bearing CO-OPS tide or water-level station within 25 km, which can be wrong on waters shared across a state or national border. ' +
-          'E.g. "WA", "CA", "PR".',
+        'Filter by 2-letter US state or territory code. Applies to CO-OPS stations only — providing it restricts results to CO-OPS and excludes NDBC buoys (which carry no state). A station matches on its own catalog code, or — when its catalog rows carry none, as with every current station — on the state of the nearest state-bearing CO-OPS tide or water-level station within 25 km, which can be wrong on waters shared across a state or national border. E.g. "WA", "CA", "PR".',
       ),
     source: z
       .enum(['coops', 'ndbc', 'all'])
@@ -250,23 +242,12 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
             'buoy',
           ])
           .describe(
-            "Filter value. Six are data capabilities, matched against a station's capabilities list: " +
-              'tide (CO-OPS tide predictions → noaa_marine_get_tide_predictions), ' +
-              'current (CO-OPS tidal-current predictions → noaa_marine_get_currents), ' +
-              'water_level (CO-OPS observed water levels → noaa_marine_get_water_level), ' +
-              'met (NDBC meteorological → noaa_marine_get_conditions), ' +
-              'current_profile (NDBC observed ocean-current depth profile → noaa_marine_get_current_profile; ' +
-              'note this is a different data product and source than CO-OPS `current`), ' +
-              'water_quality (NDBC sub-surface water-column sensors → noaa_marine_get_ocean_observations). ' +
-              'The seventh, buoy, is a physical-platform filter (NDBC platform class equals buoy), not a data ' +
-              'capability — use it to select buoy-class platforms regardless of what data they serve.',
+            "Filter value. Six are data capabilities, matched against a station's capabilities list: tide (CO-OPS tide predictions → noaa_marine_get_tide_predictions), current (CO-OPS tidal-current predictions → noaa_marine_get_currents), water_level (CO-OPS observed water levels → noaa_marine_get_water_level, and their verified monthly means → noaa_marine_get_monthly_means), met (NDBC meteorological → noaa_marine_get_conditions), current_profile (NDBC observed ocean-current depth profile → noaa_marine_get_current_profile; note this is a different data product and source than CO-OPS `current`), water_quality (NDBC sub-surface water-column sensors → noaa_marine_get_ocean_observations). The seventh, buoy, is a physical-platform filter (NDBC platform class equals buoy), not a data capability — use it to select buoy-class platforms regardless of what data they serve.",
           ),
       )
       .optional()
       .describe(
-        'Filter by data capability or NDBC platform class. Every returned station matches at least one requested ' +
-          'value — a capability value against its capabilities list, or buoy against its platform class. ' +
-          'Omit to return all stations.',
+        'Filter by data capability or NDBC platform class. Every returned station matches at least one requested value — a capability value against its capabilities list, or buoy against its platform class. Omit to return all stations.',
       ),
     limit: z
       .number()
@@ -291,19 +272,13 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
               .string()
               .optional()
               .describe(
-                'The data capability this row leads with — always one of the values in capabilities. When a types ' +
-                  'filter of capability values is set this is the first requested capability the station has, so it ' +
-                  'never contradicts the filter; otherwise it is the first capability. Omitted when the station has ' +
-                  'no data capability (e.g. a bare buoy/fixed platform matched only by a platform filter) — read ' +
-                  'platform for its identity. This is a data-product axis, never the physical platform class.',
+                'The data capability this row leads with — always one of the values in capabilities. When a types filter of capability values is set this is the first requested capability the station has, so it never contradicts the filter; otherwise it is the first capability. Omitted when the station has no data capability (e.g. a bare buoy/fixed platform matched only by a platform filter) — read platform for its identity. This is a data-product axis, never the physical platform class.',
               ),
             platform: z
               .string()
               .optional()
               .describe(
-                'NDBC physical platform class: buoy, fixed, oilrig, dart, tao, usv, or other. A different axis than ' +
-                  'type/capabilities (which describe data products). Omitted for CO-OPS stations — CO-OPS publishes ' +
-                  'no platform taxonomy.',
+                'NDBC physical platform class: buoy, fixed, oilrig, dart, tao, usv, or other. A different axis than type/capabilities (which describe data products). Omitted for CO-OPS stations — CO-OPS publishes no platform taxonomy.',
               ),
             latitude: z.number().describe('Station latitude in decimal degrees.'),
             longitude: z.number().describe('Station longitude in decimal degrees.'),
@@ -328,9 +303,7 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
             capabilities: z
               .array(z.string().describe('Capability identifier, e.g. "tide", "water_level".'))
               .describe(
-                'Data products available at this station: any of tide, current, water_level (CO-OPS) or met, ' +
-                  'current_profile, water_quality (NDBC). Empty when the station reports no data capability — ' +
-                  'platform still identifies it.',
+                'Data products available at this station: any of tide, current, water_level (CO-OPS) or met, current_profile, water_quality (NDBC). Empty when the station reports no data capability — platform still identifies it.',
               ),
             prediction_class: z
               .string()

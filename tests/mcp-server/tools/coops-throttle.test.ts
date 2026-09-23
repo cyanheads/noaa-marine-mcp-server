@@ -11,6 +11,7 @@ import { runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { noaaMarineFindStations } from '@/mcp-server/tools/definitions/noaa-marine-find-stations.tool.js';
 import { noaaMarineGetCurrents } from '@/mcp-server/tools/definitions/noaa-marine-get-currents.tool.js';
+import { noaaMarineGetMonthlyMeans } from '@/mcp-server/tools/definitions/noaa-marine-get-monthly-means.tool.js';
 import { noaaMarineGetTidePredictions } from '@/mcp-server/tools/definitions/noaa-marine-get-tide-predictions.tool.js';
 import { noaaMarineGetWaterLevel } from '@/mcp-server/tools/definitions/noaa-marine-get-water-level.tool.js';
 import { initCoopsService } from '@/services/coops/coops-service.js';
@@ -179,6 +180,38 @@ describe('noaa_marine_get_tide_predictions under a CO-OPS throttle', () => {
   });
 });
 
+describe('noaa_marine_get_monthly_means under a CO-OPS throttle', () => {
+  it('reports upstream_throttled after one data request and no catalog read', async () => {
+    const upstream = fake(THROTTLED);
+    const result = await runToolContract(noaaMarineGetMonthlyMeans, {
+      station_id: '9447130',
+      begin_date: '20250101',
+      end_date: '20251231',
+    });
+
+    expectThrottled(result, declaredRecovery(noaaMarineGetMonthlyMeans));
+    expect(callsTo(upstream, 'data')).toHaveLength(1);
+    expect(callsTo(upstream, 'catalog')).toHaveLength(0);
+  });
+
+  it('is the throttle even when the 403 body carries a CO-OPS datum phrase', async () => {
+    fake(
+      () =>
+        new Response('{"error": {"message":" There is no IGLD for the station: 9447130"}}', {
+          status: 403,
+        }),
+    );
+    const result = await runToolContract(noaaMarineGetMonthlyMeans, {
+      station_id: '9447130',
+      begin_date: '20250101',
+      end_date: '20251231',
+      datum: 'IGLD',
+    });
+
+    expect(errorOf(result).data?.reason).toBe('upstream_throttled');
+  });
+});
+
 describe('noaa_marine_get_currents under a CO-OPS throttle', () => {
   it('reports upstream_throttled after one catalog and one data request', async () => {
     const upstream = fake(THROTTLED);
@@ -326,6 +359,10 @@ describe('CO-OPS 400 handling is unchanged by the throttle mapping', () => {
       () => runToolContract(noaaMarineGetWaterLevel, { station_id: '9447130', ...DATES }),
     ],
     ['currents', () => runToolContract(noaaMarineGetCurrents, { station_id: 'PUG1515', ...DATES })],
+    [
+      'monthly means',
+      () => runToolContract(noaaMarineGetMonthlyMeans, { station_id: '9447130', ...DATES }),
+    ],
   ])('keeps station_not_found for an unclassifiable 400 on %s', async (_name, run) => {
     fake((endpoint, url) =>
       endpoint === 'data'

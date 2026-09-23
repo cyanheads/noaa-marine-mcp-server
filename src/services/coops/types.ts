@@ -67,6 +67,36 @@ export interface CoopsDataRow {
   v: string;
 }
 
+/**
+ * A `monthly_mean` row: one station-month of tidal datums and extremes. Every value arrives as
+ * a string, and CO-OPS sends an empty string for a value the station does not carry — at a
+ * Great Lakes station only `highest`, `MSL`, and `lowest` are populated. Heights are relative
+ * to the requested datum in the requested units; `HWI` and `LWI` are lunitidal intervals in
+ * hours.
+ */
+export interface CoopsMonthlyMeanRow {
+  DHQ?: string;
+  DLQ?: string;
+  DTL?: string;
+  GT?: string;
+  HWI?: string;
+  highest?: string;
+  /** CO-OPS's inferred-data code, e.g. `0`, `1`, or `11` — a code, not a boolean. */
+  inferred: string;
+  LWI?: string;
+  lowest?: string;
+  MHHW?: string;
+  MHW?: string;
+  MLLW?: string;
+  MLW?: string;
+  MN?: string;
+  MSL?: string;
+  MTL?: string;
+  /** Month number, 1–12, unpadded. */
+  month: string;
+  year: string;
+}
+
 /** A tidal prediction row. */
 export interface CoopsPredictionRow {
   t: string;
