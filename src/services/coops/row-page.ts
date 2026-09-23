@@ -1,6 +1,6 @@
 /**
  * @fileoverview Byte-bounded row paging shared by the CO-OPS time-series tools
- *   (water level, tide predictions, tidal currents).
+ *   (water level, monthly means, tide predictions, tidal currents).
  * @module services/coops/row-page
  *
  * A CO-OPS time series is dense and its row width varies by product, so a fixed row

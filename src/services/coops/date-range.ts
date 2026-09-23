@@ -14,7 +14,8 @@
  * which the tools then mislabel as `station_not_found`. This validator rejects those
  * locally before any upstream call, and rejects reversed ranges (begin after end).
  * It deliberately does not enforce a maximum span: each tool keeps its own limit
- * (365 days for predictions/currents, 31 for 6-minute water level, 73,000 for monthly means).
+ * (365 days for predictions/currents, 31 to 3,655 for water level by interval, 73,000 for
+ * monthly means).
  */
 
 /** Parsed range plus its span in whole days (both endpoints at midnight UTC). */
