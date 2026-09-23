@@ -62,8 +62,7 @@ export const noaaMarineGetCurrents = tool('noaa_marine_get_currents', {
       .string()
       .regex(/^[A-Za-z0-9_-]{1,20}$/)
       .describe(
-        'CO-OPS current station ID (alphanumeric, e.g. "ACT4176"). ' +
-          'Obtain from noaa_marine_find_stations with types=["current"].',
+        'CO-OPS current station ID (alphanumeric, e.g. "ACT4176"). Obtain from noaa_marine_find_stations with types=["current"].',
       ),
     begin_date: z
       .string()
@@ -77,8 +76,7 @@ export const noaaMarineGetCurrents = tool('noaa_marine_get_currents', {
       .enum(['lst_ldt', 'gmt', 'lst'])
       .default('lst_ldt')
       .describe(
-        'Time zone for returned timestamps. lst_ldt = local standard/daylight time (default); ' +
-          'gmt = UTC; lst = local standard time year-round.',
+        'Time zone for returned timestamps. lst_ldt = local standard/daylight time (default); gmt = UTC; lst = local standard time year-round.',
       ),
     units: z
       .enum(['english', 'metric'])
@@ -90,8 +88,7 @@ export const noaaMarineGetCurrents = tool('noaa_marine_get_currents', {
       .enum(['MAX_SLACK', '6min'])
       .default('MAX_SLACK')
       .describe(
-        'Prediction interval: MAX_SLACK (default) returns max flood, max ebb, and slack water events — ' +
-          'ideal for passage planning. 6min returns a continuous current curve.',
+        'Prediction interval: MAX_SLACK (default) returns max flood, max ebb, and slack water events — ideal for passage planning. 6min returns a continuous current curve.',
       ),
     bin: z
       .number()

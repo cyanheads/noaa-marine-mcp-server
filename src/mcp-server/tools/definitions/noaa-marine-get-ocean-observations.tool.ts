@@ -17,8 +17,7 @@ export const noaaMarineGetOceanObservations = tool('noaa_marine_get_ocean_observ
       .string()
       .regex(/^[A-Za-z0-9_-]{1,20}$/)
       .describe(
-        'NDBC station ID (5-character alphanumeric, e.g. "44033" or "TIBC1"). ' +
-          'Obtain from noaa_marine_find_stations with source="ndbc" and types=["water_quality"].',
+        'NDBC station ID (5-character alphanumeric, e.g. "44033" or "TIBC1"). Obtain from noaa_marine_find_stations with source="ndbc" and types=["water_quality"].',
       ),
   }),
 

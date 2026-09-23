@@ -17,8 +17,7 @@ export const noaaMarineGetCurrentProfile = tool('noaa_marine_get_current_profile
       .string()
       .regex(/^[A-Za-z0-9_-]{1,20}$/)
       .describe(
-        'NDBC station ID (5-character alphanumeric, e.g. "44033"). ' +
-          'Obtain from noaa_marine_find_stations with source="ndbc" and types=["current_profile"].',
+        'NDBC station ID (5-character alphanumeric, e.g. "44033"). Obtain from noaa_marine_find_stations with source="ndbc" and types=["current_profile"].',
       ),
   }),
 
