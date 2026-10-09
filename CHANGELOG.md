@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.6.1](changelog/0.6.x/0.6.1.md) — 2026-10-08
+
+Framework 0.13.14: error results carry a request ID, wrong-typed arguments such as numeric strings are repaired instead of rejected, and the Docker image installs dependencies on the build platform.
+
 ## [0.6.0](changelog/0.6.x/0.6.0.md) — 2026-09-22
 
 New noaa_marine_get_monthly_means tool, window-based verified_data_lag fix
