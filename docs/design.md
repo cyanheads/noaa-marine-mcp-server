@@ -70,7 +70,7 @@ Key fields per tool — implementer must include these in the Zod `output` schem
 
 ### Error Contracts
 
-Typed domain failures each definition enumerates in its `errors: [...]` block. Baseline infrastructure errors (`ServiceUnavailable`, `Timeout`, `ValidationError`, `InternalError`) bubble freely and don't need declaring; a tool declares one anyway when it is a failure the caller can plan around (`sources_unavailable`, `invalid_date_range`, `date_range_exceeded`). An entry marked service-thrown is raised by `CoopsService` rather than the handler, and carries the calling tool's declared recovery through `ctx.recoveryFor`.
+Typed domain failures each definition enumerates in its `errors: [...]` block. Baseline infrastructure errors (`ServiceUnavailable`, `Timeout`, `ValidationError`, `InternalError`) bubble freely and don't need declaring; a tool declares one anyway when it is a failure the caller can plan around (`sources_unavailable`, `invalid_date_range`, `date_range_exceeded`). An entry marked service-thrown is raised by `CoopsService` rather than the handler, carrying only `data: { reason }`; the framework fills the calling tool's declared recovery for that reason at the handler boundary.
 
 | Tool | reason | code | when |
 |:-----|:-------|:-----|:-----|
@@ -251,7 +251,7 @@ Each step is independently testable.
 
 **Both date forms are normalized in the shared validator, not in each handler.** `validateCoopsDateRange` accepts `YYYYMMDD` or `YYYY-MM-DD` per field, runs the calendar check on the compact form, and hands back the strings CO-OPS takes. Normalizing there keeps one point that strips the hyphens and lets every rejection name the date exactly as the caller sent it — a strip in the handler would have the validator report `20261301` for a caller who sent `2026-13-01`. The schema's `.regex()` carries its own message naming both forms, because a pattern rejection happens before the handler and that message is the only text the caller sees.
 
-**A CO-OPS 403 is mapped once, in the service, after the retry loop.** Every CO-OPS request site shares the one mapping, so a tool cannot forget it, and the calling tool's declared recovery reaches it through `ctx.recoveryFor`. It sits after `withRetry` because `RateLimited` is transient there: the retry loop would otherwise answer a throttle by sending more requests into it.
+**A CO-OPS 403 is mapped once, in the service, after the retry loop.** Every CO-OPS request site shares the one mapping, so a tool cannot forget it. The service error carries only `data: { reason: 'upstream_throttled' }`, and the framework fills the calling tool's declared recovery for that reason at the handler boundary. It sits after `withRetry` because `RateLimited` is transient there: the retry loop would otherwise answer a throttle by sending more requests into it.
 
 **The coarser water-level products are `interval` values, not separate tools.** `hourly_height`, `high_low`, and `daily_mean` are the same observed quantity at a different cadence, sharing the station, datum, units, error contract, and `{time, value}` row shape — so they are one tool's cadence selector. `monthly_mean` is not: its rows carry no `t` and no `v` but a set of tidal datums, it has no paired prediction series, and its range limit is 200 years. It is a different record type served by the same endpoint, and belongs in its own tool rather than as a fifth value of this enum.
 
