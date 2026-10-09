@@ -166,7 +166,7 @@ export const noaaMarineStationResource = resource('noaa-marine://station/{statio
                   hint: 'CO-OPS is temporarily refusing requests from this server after a burst of calls. Wait a couple of minutes before reading the station again, and space successive calls rather than sending them back to back.',
                 },
               }
-            : ctx.recoveryFor('source_unavailable')),
+            : {}),
           station_id: params.station_id,
           unread_sources: unread,
         },
@@ -176,7 +176,7 @@ export const noaaMarineStationResource = resource('noaa-marine://station/{statio
     throw ctx.fail(
       'station_not_found',
       `Station ${params.station_id} not found in CO-OPS or NDBC. Use noaa_marine_find_stations to discover valid IDs.`,
-      { ...ctx.recoveryFor('station_not_found'), station_id: params.station_id },
+      { station_id: params.station_id },
     );
   },
 });

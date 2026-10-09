@@ -587,13 +587,18 @@ describe('noaaMarineStationResource under a CO-OPS throttle', () => {
     expect(hintOf(error)).toContain('couple of minutes');
   });
 
-  it('keeps the original recovery for a CO-OPS catalog failure that is not the throttle', async () => {
+  it('keeps the declared recovery for a CO-OPS catalog failure that is not the throttle', async () => {
     vi.spyOn(getNdbcService(), 'getActiveStations').mockResolvedValue([NDBC_BUOY]);
 
     const { error } = await readStation('9447130', 404);
 
+    // The throw sets no hint of its own, so the resource factory fills the declared one,
+    // which names the short retry: an unreachable catalog is not the throttle.
     expect(error).toMatchObject({ data: { reason: 'source_unavailable' } });
-    expect(hintOf(error)).toBe(
+    expect((error as { data: Record<string, unknown> }).data).not.toHaveProperty('recovery');
+    expect(
+      noaaMarineStationResource.errors?.find((e) => e.reason === 'source_unavailable')?.recovery,
+    ).toBe(
       'Retry in a few moments — the station catalogs are cached for six hours once a fetch succeeds.',
     );
   });

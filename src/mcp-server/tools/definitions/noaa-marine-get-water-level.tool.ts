@@ -330,7 +330,7 @@ export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
     {
       reason: 'invalid_date_range',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'begin_date/end_date is not a real calendar date or begin_date is after end_date',
+      when: 'begin_date or end_date is not a real calendar date, or the range starts after it ends.',
       recovery:
         'Provide begin_date and end_date as real calendar dates, each as YYYYMMDD or YYYY-MM-DD, with begin_date on or before end_date.',
     },
@@ -385,16 +385,13 @@ export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
     // reversed ranges would otherwise return an HTTP 400 that reads as station_not_found.
     const range = validateCoopsDateRange(input.begin_date, input.end_date);
     if (!range.ok) {
-      throw ctx.fail('invalid_date_range', range.error, {
-        ...ctx.recoveryFor('invalid_date_range'),
-      });
+      throw ctx.fail('invalid_date_range', range.error);
     }
     const spec = WATER_LEVEL_INTERVALS[input.interval];
     if (range.spanDays > spec.maxDays) {
       throw ctx.fail(
         'date_range_exceeded',
         `Date range of ${Math.ceil(range.spanDays)} days exceeds the ${spec.maxDays}-day CO-OPS limit for the ${input.interval} interval.`,
-        { ...ctx.recoveryFor('date_range_exceeded') },
       );
     }
 
@@ -455,14 +452,12 @@ export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
           throw ctx.fail(
             'station_not_found',
             `CO-OPS does not have data for station ${input.station_id} — use noaa_marine_find_stations with types=["water_level"] to verify the ID.`,
-            { ...ctx.recoveryFor('station_not_found') },
           );
         }
         if (err.coopsReason === 'great_lakes_only') {
           throw ctx.fail(
             'great_lakes_only',
             `CO-OPS publishes the daily_mean water-level product at Great Lakes stations only, and rejected station ${input.station_id} as coastal.`,
-            { ...ctx.recoveryFor('great_lakes_only') },
           );
         }
         /*
@@ -477,7 +472,6 @@ export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
             throw ctx.fail(
               'verified_data_lag',
               `CO-OPS has published no ${input.interval} data for station ${input.station_id} in the requested window.`,
-              { ...ctx.recoveryFor('verified_data_lag') },
             );
           }
           throw ctx.fail(
@@ -494,7 +488,6 @@ export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
         throw ctx.fail(
           'no_data',
           `No water level data for station ${input.station_id} in the requested date range.`,
-          { ...ctx.recoveryFor('no_data') },
         );
       }
       // CO-OPS HTTP 400 — invalid station ID before response body is parsed.
@@ -504,7 +497,6 @@ export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
           throw ctx.fail(
             'station_not_found',
             `CO-OPS rejected station ${input.station_id} — use noaa_marine_find_stations with types=["water_level"] to verify the ID.`,
-            { ...ctx.recoveryFor('station_not_found') },
           );
         }
       }
@@ -555,7 +547,6 @@ export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
         gapsDropped > 0
           ? `Station ${input.station_id} reported no value in any of the ${gapsDropped} sample slots CO-OPS returned for the requested date range.`
           : `No water level data for station ${input.station_id} in the requested date range.`,
-        { ...ctx.recoveryFor('no_data') },
       );
     }
 

@@ -247,7 +247,7 @@ export const noaaMarineGetCurrents = tool('noaa_marine_get_currents', {
     {
       reason: 'invalid_date_range',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'begin_date/end_date is not a real calendar date or begin_date is after end_date',
+      when: 'begin_date or end_date is not a real calendar date, or the range starts after it ends.',
       recovery:
         'Provide begin_date and end_date as real calendar dates, each as YYYYMMDD or YYYY-MM-DD, with begin_date on or before end_date.',
     },
@@ -294,15 +294,12 @@ export const noaaMarineGetCurrents = tool('noaa_marine_get_currents', {
     // reversed ranges would otherwise return an HTTP 400 that reads as station_not_found.
     const range = validateCoopsDateRange(input.begin_date, input.end_date);
     if (!range.ok) {
-      throw ctx.fail('invalid_date_range', range.error, {
-        ...ctx.recoveryFor('invalid_date_range'),
-      });
+      throw ctx.fail('invalid_date_range', range.error);
     }
     if (range.spanDays > 365) {
       throw ctx.fail(
         'date_range_exceeded',
         `Date range of ${Math.ceil(range.spanDays)} days exceeds the 1-year limit.`,
-        { ...ctx.recoveryFor('date_range_exceeded') },
       );
     }
 
@@ -340,17 +337,14 @@ export const noaaMarineGetCurrents = tool('noaa_marine_get_currents', {
           throw ctx.fail(
             'bin_unavailable',
             `Station ${input.station_id} publishes no current predictions at bin ${input.bin}.`,
-            {
-              ...ctx.recoveryFor('bin_unavailable'),
-              ...(bins && bins.length > 0
-                ? {
-                    available_bins: bins,
-                    recovery: {
-                      hint: `Station ${input.station_id} publishes bins ${bins.join(', ')} — retry with one of those, or omit bin to take the shallowest.`,
-                    },
-                  }
-                : {}),
-            },
+            bins && bins.length > 0
+              ? {
+                  available_bins: bins,
+                  recovery: {
+                    hint: `Station ${input.station_id} publishes bins ${bins.join(', ')} — retry with one of those, or omit bin to take the shallowest.`,
+                  },
+                }
+              : undefined,
           );
         }
         if (err.coopsReason === 'predictions_unavailable') {
@@ -359,21 +353,18 @@ export const noaaMarineGetCurrents = tool('noaa_marine_get_currents', {
           throw ctx.fail(
             'predictions_unavailable',
             `CO-OPS publishes no current predictions for station ${input.station_id}, though it is in the current-predictions catalog.`,
-            { ...ctx.recoveryFor('predictions_unavailable') },
           );
         }
         if (err.coopsReason === 'no_predictions') {
           throw ctx.fail(
             'no_predictions',
             `No current prediction data for station ${input.station_id} in the requested date range.`,
-            { ...ctx.recoveryFor('no_predictions') },
           );
         }
         // station_error or no_data → station_not_found
         throw ctx.fail(
           'station_not_found',
           `CO-OPS does not have current data for station ${input.station_id} — use noaa_marine_find_stations with types=["current"] to find a valid station.`,
-          { ...ctx.recoveryFor('station_not_found') },
         );
       }
       // CO-OPS HTTP 400 whose body named no condition this server reads — treat the station
@@ -384,7 +375,6 @@ export const noaaMarineGetCurrents = tool('noaa_marine_get_currents', {
           throw ctx.fail(
             'station_not_found',
             `CO-OPS rejected station ${input.station_id} — current stations need alphanumeric IDs. Use noaa_marine_find_stations with types=["current"].`,
-            { ...ctx.recoveryFor('station_not_found') },
           );
         }
       }
@@ -421,7 +411,6 @@ export const noaaMarineGetCurrents = tool('noaa_marine_get_currents', {
         throw ctx.fail(
           'no_predictions',
           `No current predictions for station ${input.station_id} in the date range.`,
-          { ...ctx.recoveryFor('no_predictions') },
         );
       }
 
@@ -477,7 +466,6 @@ export const noaaMarineGetCurrents = tool('noaa_marine_get_currents', {
       throw ctx.fail(
         'no_predictions',
         `No 6-min current predictions for station ${input.station_id} in the date range.`,
-        { ...ctx.recoveryFor('no_predictions') },
       );
     }
 

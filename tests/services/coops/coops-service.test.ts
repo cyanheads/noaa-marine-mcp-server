@@ -622,17 +622,6 @@ async function rejectionOf(call: Promise<unknown>): Promise<McpError> {
   throw new Error('Expected the call to reject, but it resolved.');
 }
 
-/** A contract carrying the throttle reason, so the service's recovery resolves from it. */
-const THROTTLE_CONTRACT = [
-  {
-    reason: 'upstream_throttled',
-    code: JsonRpcErrorCode.RateLimited,
-    when: 'CO-OPS answered HTTP 403.',
-    recovery: 'Wait a couple of minutes, then retry more slowly.',
-    retryable: true,
-  },
-] as const;
-
 describe.each(REQUEST_SITES)(
   'CoopsService.$name upstream failures',
   ({ attempts, call, endpoint }) => {
@@ -642,7 +631,7 @@ describe.each(REQUEST_SITES)(
     });
 
     it('maps an HTTP 403 to upstream_throttled after one request, with no upstream body', async () => {
-      const ctx = createMockContext({ errors: THROTTLE_CONTRACT });
+      const ctx = createMockContext();
       const http = installCoopsFake(() => new Response('{"message":"Forbidden"}', { status: 403 }));
       try {
         const err = await rejectionOf(call(ctx));
@@ -653,8 +642,10 @@ describe.each(REQUEST_SITES)(
           reason: 'upstream_throttled',
           retryable: true,
           status: 403,
-          recovery: { hint: 'Wait a couple of minutes, then retry more slowly.' },
         });
+        // The calling tool's declared recovery is filled at the handler boundary from the
+        // reason alone, so the service error carries none of its own.
+        expect(err.data).not.toHaveProperty('recovery');
         expect(err.data).not.toHaveProperty('body');
         expect(err.data).not.toHaveProperty('responseBody');
         // RateLimited is transient to withRetry, so a mapping inside the retry closure would

@@ -437,7 +437,6 @@ describe('noaaMarineGetCurrents', () => {
   });
 
   it('reports a coverage statement as predictions_unavailable rather than an unknown station', async () => {
-    const ctx = createMockContext({ errors: noaaMarineGetCurrents.errors });
     const { getCoopsService } = await import('@/services/coops/coops-service.js');
     const svc = getCoopsService();
     vi.spyOn(svc, 'getStations').mockResolvedValue([] as never);
@@ -448,19 +447,25 @@ describe('noaaMarineGetCurrents', () => {
       ),
     );
 
-    const input = noaaMarineGetCurrents.input.parse({
+    // Through the contract runner, which fills the declared recovery as production does.
+    const result = await runToolContract(noaaMarineGetCurrents, {
       station_id: 'PCT1676',
       begin_date: '20250115',
       end_date: '20250115',
     });
-    const err = await Promise.resolve(noaaMarineGetCurrents.handler(input, ctx)).catch(
-      (e: unknown) => e,
-    );
+    const error = (
+      result.structuredContent as {
+        error: { data?: { reason?: string; recovery?: { hint?: string } } };
+      }
+    ).error;
 
-    expect(err).toMatchObject({ data: { reason: 'predictions_unavailable' } });
-    // The ID came from the discovery tool, so the recovery must not send the caller back to re-verify it.
-    const hint = (err as { data: { recovery?: { hint?: string } } }).data.recovery?.hint ?? '';
-    expect(hint).not.toMatch(/verify/i);
+    expect(result.isError).toBe(true);
+    expect(error.data?.reason).toBe('predictions_unavailable');
+    // The ID came from the discovery tool, so the recovery points at another station rather
+    // than sending the caller back to re-verify this one.
+    expect(error.data?.recovery?.hint).toBe(
+      'Try the next nearest current station from noaa_marine_find_stations, preferring one whose bins[] report a harmonic prediction_class.',
+    );
   });
 
   it('still serves a subordinate current station its normal MAX_SLACK series', async () => {

@@ -426,7 +426,6 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
       throw ctx.fail(
         'incomplete_coordinates',
         `Proximity search needs both latitude and longitude — ${missing} is missing.`,
-        { ...ctx.recoveryFor('incomplete_coordinates') },
       );
     }
     const center = lat !== undefined && lon !== undefined ? { lat, lon } : undefined;
@@ -517,7 +516,7 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
                   hint: 'CO-OPS is temporarily refusing requests from this server after a burst of calls. Wait a couple of minutes before searching again, and space successive calls rather than sending them back to back.',
                 },
               }
-            : ctx.recoveryFor('sources_unavailable')),
+            : {}),
           failed_sources: failed,
         },
       );

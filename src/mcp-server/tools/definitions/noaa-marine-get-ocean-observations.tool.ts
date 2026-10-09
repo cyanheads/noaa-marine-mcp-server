@@ -145,13 +145,11 @@ export const noaaMarineGetOceanObservations = tool('noaa_marine_get_ocean_observ
           throw ctx.fail(
             'no_ocean_data',
             `NDBC station ${input.station_id} reported no usable oceanographic data — the .ocean file exists but every depth row is missing (station offline or sensor failure).`,
-            { ...ctx.recoveryFor('no_ocean_data') },
           );
         }
         throw ctx.fail(
           'observations_not_found',
           `NDBC has no oceanographic (.ocean) file for station ${input.station_id} — sub-surface sensors are on only a subset of NDBC stations. Use noaa_marine_find_stations with source="ndbc" and types=["water_quality"] to find one that carries them.`,
-          { ...ctx.recoveryFor('observations_not_found') },
         );
       }
       throw err;

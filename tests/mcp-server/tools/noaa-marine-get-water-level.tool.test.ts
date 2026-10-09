@@ -1257,22 +1257,24 @@ describe('noaaMarineGetWaterLevel', () => {
       );
       vi.spyOn(svc, 'fetchWaterLevelPredictions').mockResolvedValue([]);
 
-      const ctx = createMockContext({ errors: noaaMarineGetWaterLevel.errors });
-      const input = noaaMarineGetWaterLevel.input.parse({
+      // Through the contract runner, which fills the declared recovery as production does.
+      const result = await runToolContract(noaaMarineGetWaterLevel, {
         begin_date: '20260901',
         end_date: '20260910',
         interval: 'hourly',
         station_id: '9447130',
       });
-      const err = await Promise.resolve(noaaMarineGetWaterLevel.handler(input, ctx)).catch(
-        (e: unknown) => e,
-      );
+      const error = (
+        result.structuredContent as {
+          error: { data?: { reason?: string; recovery?: { hint?: string } } };
+        }
+      ).error;
 
-      expect(err).toMatchObject({ data: { reason: 'verified_data_lag' } });
-      const hint = (err as { data: { recovery?: { hint?: string } } }).data.recovery?.hint ?? '';
-      expect(hint).toContain('verif');
-      expect(hint).not.toContain('may be offline');
-      expect(hint).not.toContain('in the future');
+      expect(result.isError).toBe(true);
+      expect(error.data?.reason).toBe('verified_data_lag');
+      expect(error.data?.recovery?.hint).toBe(
+        'CO-OPS verifies these products monthly, for the prior month, so request a window ending before the first day of the prior month — or use interval "6min", whose preliminary data reaches the present.',
+      );
     });
 
     it('enforces each interval CO-OPS range limit locally, naming that interval limit', async () => {

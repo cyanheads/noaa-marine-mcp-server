@@ -159,13 +159,11 @@ export const noaaMarineGetConditions = tool('noaa_marine_get_conditions', {
           throw ctx.fail(
             'no_sensor_data',
             `NDBC buoy ${input.station_id} reported no usable sensor data — the buoy file exists but every sensor value is missing (buoy offline or sensor failure).`,
-            { ...ctx.recoveryFor('no_sensor_data') },
           );
         }
         throw ctx.fail(
           'buoy_not_found',
           `NDBC has no observation file for station ${input.station_id} — use noaa_marine_find_stations with source="ndbc" and types=["met"] to find a conditions-capable station.`,
-          { ...ctx.recoveryFor('buoy_not_found') },
         );
       }
       throw err;

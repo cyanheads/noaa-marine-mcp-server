@@ -103,13 +103,11 @@ export const noaaMarineGetCurrentProfile = tool('noaa_marine_get_current_profile
           throw ctx.fail(
             'no_current_data',
             `NDBC station ${input.station_id} reported no usable current data — the ADCP file exists but every depth bin is missing (profiler offline or sensor failure).`,
-            { ...ctx.recoveryFor('no_current_data') },
           );
         }
         throw ctx.fail(
           'profile_not_found',
           `NDBC has no ADCP current-profile file for station ${input.station_id} — use noaa_marine_find_stations with source="ndbc" and types=["current_profile"] to find a current-profile-capable station.`,
-          { ...ctx.recoveryFor('profile_not_found') },
         );
       }
       throw err;

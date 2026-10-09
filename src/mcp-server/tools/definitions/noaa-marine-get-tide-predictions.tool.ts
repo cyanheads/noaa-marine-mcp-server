@@ -160,7 +160,7 @@ export const noaaMarineGetTidePredictions = tool('noaa_marine_get_tide_predictio
     {
       reason: 'invalid_date_range',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'begin_date/end_date is not a real calendar date or begin_date is after end_date',
+      when: 'begin_date or end_date is not a real calendar date, or the range starts after it ends.',
       recovery:
         'Provide begin_date and end_date as real calendar dates, each as YYYYMMDD or YYYY-MM-DD, with begin_date on or before end_date.',
     },
@@ -207,15 +207,12 @@ export const noaaMarineGetTidePredictions = tool('noaa_marine_get_tide_predictio
     // reversed ranges would otherwise return an HTTP 400 that reads as station_not_found.
     const range = validateCoopsDateRange(input.begin_date, input.end_date);
     if (!range.ok) {
-      throw ctx.fail('invalid_date_range', range.error, {
-        ...ctx.recoveryFor('invalid_date_range'),
-      });
+      throw ctx.fail('invalid_date_range', range.error);
     }
     if (range.spanDays > 365) {
       throw ctx.fail(
         'date_range_exceeded',
         `Date range of ${Math.ceil(range.spanDays)} days exceeds the 1-year limit.`,
-        { ...ctx.recoveryFor('date_range_exceeded') },
       );
     }
 
@@ -301,7 +298,6 @@ export const noaaMarineGetTidePredictions = tool('noaa_marine_get_tide_predictio
           throw ctx.fail(
             'station_not_found',
             `CO-OPS does not have data for station ${input.station_id} — use noaa_marine_find_stations with types=["tide"] to verify the ID.`,
-            { ...ctx.recoveryFor('station_not_found') },
           );
         }
         // no_data, no_predictions, predictions_unavailable — the station is known and its
@@ -309,7 +305,6 @@ export const noaaMarineGetTidePredictions = tool('noaa_marine_get_tide_predictio
         throw ctx.fail(
           'no_predictions',
           `No tide prediction data for station ${input.station_id} — the station may be the wrong type or inactive.`,
-          { ...ctx.recoveryFor('no_predictions') },
         );
       }
       // CO-OPS HTTP 400 — invalid/unknown station ID before response body is parsed.
@@ -319,7 +314,6 @@ export const noaaMarineGetTidePredictions = tool('noaa_marine_get_tide_predictio
           throw ctx.fail(
             'station_not_found',
             `CO-OPS rejected station ${input.station_id} — use noaa_marine_find_stations with types=["tide"] to verify the ID.`,
-            { ...ctx.recoveryFor('station_not_found') },
           );
         }
       }
@@ -332,7 +326,6 @@ export const noaaMarineGetTidePredictions = tool('noaa_marine_get_tide_predictio
       throw ctx.fail(
         'no_predictions',
         `No predictions returned for station ${input.station_id} in the requested date range.`,
-        { ...ctx.recoveryFor('no_predictions') },
       );
     }
 

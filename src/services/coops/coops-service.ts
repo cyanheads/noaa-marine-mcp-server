@@ -221,20 +221,15 @@ const THROTTLED_REASON = 'upstream_throttled';
  * Read from the status, before any body classification — a 403 is the block whatever its body
  * says. Applied on the rejection path *after* `withRetry`: `RateLimited` is transient to the
  * retry loop, so mapping it inside the closure would re-send the request into the block. The
- * upstream body stays off the error, and the calling tool's declared recovery rides along
- * through `ctx.recoveryFor`, which resolves against that tool's contract.
+ * upstream body stays off the error. The error carries only the reason: the framework fills the
+ * calling tool's declared recovery for it at the handler boundary.
  */
-function throttledError(err: unknown, ctx: Context): McpError | undefined {
+function throttledError(err: unknown): McpError | undefined {
   if (!(err instanceof McpError)) return;
   if (err.data?.status !== 403) return;
   return rateLimited(
     'CO-OPS refused the request with HTTP 403, which it returns while it throttles a burst of requests from one address.',
-    {
-      reason: THROTTLED_REASON,
-      retryable: true,
-      status: 403,
-      ...ctx.recoveryFor(THROTTLED_REASON),
-    },
+    { reason: THROTTLED_REASON, retryable: true, status: 403 },
     { cause: err },
   );
 }
@@ -290,7 +285,7 @@ export class CoopsService {
         signal: ctx.signal,
       },
     ).catch((err: unknown) => {
-      throw throttledError(err, ctx) ?? err;
+      throw throttledError(err) ?? err;
     });
 
     this.stationCache.set(type, { stations, fetchedAt: Date.now() });
@@ -374,7 +369,7 @@ export class CoopsService {
         maxRetries: 3,
         signal: ctx.signal,
       },
-    ).catch((err: unknown) => this.rethrowClassified(err, ctx, params.datum));
+    ).catch((err: unknown) => this.rethrowClassified(err, params.datum));
   }
 
   /**
@@ -429,7 +424,7 @@ export class CoopsService {
         maxRetries: 3,
         signal: ctx.signal,
       },
-    ).catch((err: unknown) => this.rethrowClassified(err, ctx, params.datum));
+    ).catch((err: unknown) => this.rethrowClassified(err, params.datum));
   }
 
   /**
@@ -477,7 +472,7 @@ export class CoopsService {
         maxRetries: 3,
         signal: ctx.signal,
       },
-    ).catch((err: unknown) => this.rethrowClassified(err, ctx, params.datum));
+    ).catch((err: unknown) => this.rethrowClassified(err, params.datum));
   }
 
   /**
@@ -528,7 +523,7 @@ export class CoopsService {
         maxRetries: 2,
         signal: ctx.signal,
       },
-    ).catch((err: unknown) => this.rethrowClassified(err, ctx, params.datum));
+    ).catch((err: unknown) => this.rethrowClassified(err, params.datum));
   }
 
   /** Fetch current predictions for a station, optionally for a specific depth bin. */
@@ -596,7 +591,7 @@ export class CoopsService {
         maxRetries: 3,
         signal: ctx.signal,
       },
-    ).catch((err: unknown) => this.rethrowClassified(err, ctx));
+    ).catch((err: unknown) => this.rethrowClassified(err));
   }
 
   private buildDataUrl(params: Record<string, string>): string {
@@ -641,8 +636,8 @@ export class CoopsService {
    * caller needs in both cases. Anything else bubbles unchanged so the tool's generic status
    * handling still applies.
    */
-  private rethrowClassified(err: unknown, ctx: Context, requestedDatum?: string): never {
-    const throttled = throttledError(err, ctx);
+  private rethrowClassified(err: unknown, requestedDatum?: string): never {
+    const throttled = throttledError(err);
     if (throttled) throw throttled;
     const data =
       err instanceof McpError ? (err.data as Record<string, unknown> | undefined) : undefined;

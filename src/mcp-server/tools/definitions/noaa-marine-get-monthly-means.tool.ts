@@ -214,7 +214,7 @@ export const noaaMarineGetMonthlyMeans = tool('noaa_marine_get_monthly_means', {
     {
       reason: 'invalid_date_range',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'begin_date/end_date is not a real calendar date or begin_date is after end_date',
+      when: 'begin_date or end_date is not a real calendar date, or the range starts after it ends.',
       recovery:
         'Provide begin_date and end_date as real calendar dates, each as YYYYMMDD or YYYY-MM-DD, with begin_date on or before end_date.',
     },
@@ -268,15 +268,12 @@ export const noaaMarineGetMonthlyMeans = tool('noaa_marine_get_monthly_means', {
     // HTTP 400 that reads as an unknown station.
     const range = validateCoopsDateRange(input.begin_date, input.end_date);
     if (!range.ok) {
-      throw ctx.fail('invalid_date_range', range.error, {
-        ...ctx.recoveryFor('invalid_date_range'),
-      });
+      throw ctx.fail('invalid_date_range', range.error);
     }
     if (range.spanDays > MAX_SPAN_DAYS) {
       throw ctx.fail(
         'date_range_exceeded',
         `Date range of ${Math.ceil(range.spanDays)} days exceeds the 73,000-day CO-OPS limit for monthly means.`,
-        { ...ctx.recoveryFor('date_range_exceeded') },
       );
     }
 
@@ -290,12 +287,10 @@ export const noaaMarineGetMonthlyMeans = tool('noaa_marine_get_monthly_means', {
         ? ctx.fail(
             'verified_data_lag',
             `CO-OPS has published no monthly means for station ${input.station_id} in a window ending ${input.end_date}.`,
-            { ...ctx.recoveryFor('verified_data_lag') },
           )
         : ctx.fail(
             'no_data',
             `CO-OPS has no monthly means for station ${input.station_id} in a window ending ${input.end_date}. The window ends before the prior month, so it is not waiting on CO-OPS's monthly verification.`,
-            { ...ctx.recoveryFor('no_data') },
           );
 
     const fetched = await getCoopsService()
@@ -315,21 +310,18 @@ export const noaaMarineGetMonthlyMeans = tool('noaa_marine_get_monthly_means', {
             throw ctx.fail(
               'datum_unavailable',
               `Station ${input.station_id} does not carry datum ${input.datum}.`,
-              { ...ctx.recoveryFor('datum_unavailable') },
             );
           }
           if (err.coopsReason === 'station_error') {
             throw ctx.fail(
               'station_not_found',
               `CO-OPS does not recognize station ${input.station_id}.`,
-              { ...ctx.recoveryFor('station_not_found') },
             );
           }
           if (err.coopsReason === 'product_not_offered') throw noMonths();
           throw ctx.fail(
             'no_data',
             `No monthly means for station ${input.station_id} in the requested range.`,
-            { ...ctx.recoveryFor('no_data') },
           );
         }
         // An HTTP 400 whose body names no condition the classifier reads — CO-OPS's
@@ -338,7 +330,6 @@ export const noaaMarineGetMonthlyMeans = tool('noaa_marine_get_monthly_means', {
           throw ctx.fail(
             'station_not_found',
             `CO-OPS rejected station ${input.station_id} as not a valid station.`,
-            { ...ctx.recoveryFor('station_not_found') },
           );
         }
         throw err;
