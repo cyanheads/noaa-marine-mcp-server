@@ -5,6 +5,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { getCoopsService, isCoopsThrottled } from '@/services/coops/coops-service.js';
 import { currentPredictionClass, tidePredictionClass } from '@/services/coops/prediction-class.js';
 import { STATE_CODES } from '@/services/coops/station-state.js';
@@ -358,6 +359,7 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
   },
 
   enrichmentTrailer: {
+    notice: { render: (value: string) => `> ${escapeMarkdownInline(value)}` },
     applied_search: {
       render: (v: AppliedSearch) => {
         const parts = [
@@ -366,7 +368,7 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
         ];
         if (v.state) parts.push(`state=${v.state}`);
         if (v.types) parts.push(`types=[${v.types.join(', ')}]`);
-        if (v.query) parts.push(`query="${v.query}"`);
+        if (v.query) parts.push(`query="${escapeMarkdownInline(v.query)}"`);
         if (v.center && v.radius_km !== undefined) {
           parts.push(`within ${v.radius_km} km of ${v.center.latitude}, ${v.center.longitude}`);
         }
@@ -733,10 +735,12 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
         ? ` · ${s.state}${s.state_derived ? ' (derived from the nearest state-bearing station)' : ''}`
         : '';
       const typeStr = s.type ? ` · **Type:** ${s.type}` : '';
-      const platformStr = s.platform ? ` · **Platform:** ${s.platform}` : '';
-      const classStr = s.prediction_class ? ` · **Prediction class:** ${s.prediction_class}` : '';
+      const platformStr = s.platform ? ` · **Platform:** ${escapeMarkdownInline(s.platform)}` : '';
+      const classStr = s.prediction_class
+        ? ` · **Prediction class:** ${escapeMarkdownInline(s.prediction_class)}`
+        : '';
       lines.push(
-        `### ${s.name} (${s.station_id})`,
+        `### ${escapeMarkdownInline(s.name)} (${escapeMarkdownInline(s.station_id)})`,
         `**Source:** ${s.source.toUpperCase()}${typeStr}${platformStr}${classStr}${dist}${state}`,
         `**Coordinates:** ${s.latitude}, ${s.longitude}`,
         `**Capabilities:** ${s.capabilities.length > 0 ? s.capabilities.join(', ') : 'none reported'}`,
@@ -744,14 +748,16 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
       if (s.bins && s.bins.length > 0) {
         const bins = s.bins.map((b) => {
           const depth = b.depth !== null ? `${b.depth} ft` : 'depth not published';
-          const depthType = b.depth_type ? `, ${b.depth_type}` : '';
-          const binClass = b.prediction_class ? `, ${b.prediction_class}` : '';
+          const depthType = b.depth_type ? `, ${escapeMarkdownInline(b.depth_type)}` : '';
+          const binClass = b.prediction_class
+            ? `, ${escapeMarkdownInline(b.prediction_class)}`
+            : '';
           return `${b.bin} (${depth}${depthType}${binClass})`;
         });
         lines.push(`**Current bins:** ${bins.join(' · ')}`);
       }
       if (s.reference_id) {
-        lines.push(`**Reference station:** ${s.reference_id}`);
+        lines.push(`**Reference station:** ${escapeMarkdownInline(s.reference_id)}`);
       }
       lines.push('');
     }

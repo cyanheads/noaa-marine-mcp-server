@@ -5,6 +5,7 @@
 
 import { type Context, tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import {
   getCoopsService,
   isCoopsBodyError,
@@ -671,7 +672,7 @@ export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
 
   format: (result) => {
     const lines: string[] = [
-      `## Water Level — ${result.station_name} (${result.station_id})`,
+      `## Water Level — ${escapeMarkdownInline(result.station_name)} (${escapeMarkdownInline(result.station_id)})`,
       `**Datum:** ${result.datum} · **Units:** ${result.units} · **Interval:** ${result.interval}`,
     ];
 
@@ -690,14 +691,14 @@ export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
     for (const o of result.observations) {
       const sig = o.sigma !== undefined ? ` ±${o.sigma}` : '';
       const kind = o.type !== undefined ? ` (${o.type})` : '';
-      const flag = o.quality !== undefined ? ` [${o.quality}]` : '';
-      lines.push(`${o.time}: ${o.value} ${unit}${sig}${kind}${flag}`);
+      const flag = o.quality !== undefined ? ` [${escapeMarkdownInline(o.quality)}]` : '';
+      lines.push(`${escapeMarkdownInline(o.time)}: ${o.value} ${unit}${sig}${kind}${flag}`);
     }
 
     if (result.predictions.length > 0) {
       lines.push('', `**Predictions** (${result.predictions.length} records):`);
       for (const p of result.predictions) {
-        lines.push(`${p.time}: ${p.value} ${unit} (predicted)`);
+        lines.push(`${escapeMarkdownInline(p.time)}: ${p.value} ${unit} (predicted)`);
       }
     }
 

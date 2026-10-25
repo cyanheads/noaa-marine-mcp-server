@@ -5,6 +5,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { getNdbcService } from '@/services/ndbc/ndbc-service.js';
 
 export const noaaMarineGetOceanObservations = tool('noaa_marine_get_ocean_observations', {
@@ -187,7 +188,7 @@ export const noaaMarineGetOceanObservations = tool('noaa_marine_get_ocean_observ
   format: (result) => {
     const fmt = (v: number | null, unit: string) => (v !== null ? `${v} ${unit}` : 'not reported');
     const lines: string[] = [
-      `## Ocean Observations — ${result.station_name} (${result.station_id})`,
+      `## Ocean Observations — ${escapeMarkdownInline(result.station_name)} (${escapeMarkdownInline(result.station_id)})`,
       `**Observed at:** ${result.observed_at} · **Source:** ${result.source} · **Depths:** ${result.reading_count}`,
       `**Location:** ${result.latitude ?? 'unknown'}, ${result.longitude ?? 'unknown'}`,
     ];

@@ -5,6 +5,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { getNdbcService } from '@/services/ndbc/ndbc-service.js';
 
 export const noaaMarineGetCurrentProfile = tool('noaa_marine_get_current_profile', {
@@ -137,7 +138,7 @@ export const noaaMarineGetCurrentProfile = tool('noaa_marine_get_current_profile
 
   format: (result) => {
     const lines: string[] = [
-      `## Ocean Current Profile — ${result.station_name} (${result.station_id})`,
+      `## Ocean Current Profile — ${escapeMarkdownInline(result.station_name)} (${escapeMarkdownInline(result.station_id)})`,
       `**Observed at:** ${result.observed_at} · **Source:** ${result.source} · **Bins:** ${result.bin_count}`,
       `**Location:** ${result.latitude ?? 'unknown'}, ${result.longitude ?? 'unknown'}`,
       '',

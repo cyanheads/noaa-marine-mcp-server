@@ -5,6 +5,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { getCoopsService, isCoopsBodyError } from '@/services/coops/coops-service.js';
 import { COOPS_DATE_FORM, validateCoopsDateRange } from '@/services/coops/date-range.js';
 import { pageDisclosure, pageNotice, pageRows } from '@/services/coops/row-page.js';
@@ -234,6 +235,10 @@ export const noaaMarineGetCurrents = tool('noaa_marine_get_currents', {
       .describe(
         'Offset to pass as offset on the next call, or null when this page reaches the last matched row. Absent when the whole matched series was returned.',
       ),
+  },
+
+  enrichmentTrailer: {
+    notice: { render: (value: string) => `> ${escapeMarkdownInline(value)}` },
   },
 
   errors: [
@@ -510,7 +515,7 @@ export const noaaMarineGetCurrents = tool('noaa_marine_get_currents', {
     if (result.depth !== null) meta.push(`**Depth:** ${result.depth} ${depthUnit}`);
 
     const lines: string[] = [
-      `## Tidal Currents — ${result.station_name} (${result.station_id})`,
+      `## Tidal Currents — ${escapeMarkdownInline(result.station_name)} (${escapeMarkdownInline(result.station_id)})`,
       meta.join(' · '),
       '',
     ];
@@ -520,7 +525,7 @@ export const noaaMarineGetCurrents = tool('noaa_marine_get_currents', {
       for (const e of result.events) {
         const speed = e.speed !== undefined ? ` ${e.speed} ${speedUnit}` : '';
         const dir = e.direction !== undefined ? ` @${e.direction}°` : '';
-        lines.push(`${e.time}: ${e.type}${speed}${dir}`);
+        lines.push(`${escapeMarkdownInline(e.time)}: ${e.type}${speed}${dir}`);
       }
     } else if (result.events) {
       lines.push('**Events:** none returned.');
@@ -532,7 +537,7 @@ export const noaaMarineGetCurrents = tool('noaa_marine_get_currents', {
       // here would leave a content[]-only client unable to reach the rows it omits.
       for (const p of result.predictions) {
         const dirStr = p.direction !== null ? ` @${p.direction}°` : '';
-        lines.push(`${p.time}: ${p.type} ${p.speed} ${speedUnit}${dirStr}`);
+        lines.push(`${escapeMarkdownInline(p.time)}: ${p.type} ${p.speed} ${speedUnit}${dirStr}`);
       }
     } else if (result.predictions) {
       lines.push('**6-min predictions:** none returned.');

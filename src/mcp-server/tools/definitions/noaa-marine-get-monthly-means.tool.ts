@@ -5,6 +5,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { getCoopsService, isCoopsBodyError } from '@/services/coops/coops-service.js';
 import {
   awaitsVerification,
@@ -390,7 +391,7 @@ export const noaaMarineGetMonthlyMeans = tool('noaa_marine_get_monthly_means', {
   format: (result) => {
     const unit = result.units === 'metric' ? 'm' : 'ft';
     const lines: string[] = [
-      `## Monthly Means — ${result.station_name} (${result.station_id})`,
+      `## Monthly Means — ${escapeMarkdownInline(result.station_name)} (${escapeMarkdownInline(result.station_id)})`,
       `**Datum:** ${result.datum} · **Units:** ${result.units} · **Range:** ${result.begin_date}–${result.end_date}`,
       '',
       `**Months** (${result.months.length} records):`,
@@ -407,7 +408,7 @@ export const noaaMarineGetMonthlyMeans = tool('noaa_marine_get_monthly_means', {
       }
       const month = String(m.month).padStart(2, '0');
       const body = values.length > 0 ? values.join(' · ') : 'no values published';
-      lines.push(`${m.year}-${month}: ${body} · inferred ${m.inferred}`);
+      lines.push(`${m.year}-${month}: ${body} · inferred ${escapeMarkdownInline(m.inferred)}`);
     }
 
     return [{ type: 'text', text: lines.join('\n') }];

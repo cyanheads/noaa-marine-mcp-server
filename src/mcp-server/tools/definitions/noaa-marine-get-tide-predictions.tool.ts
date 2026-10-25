@@ -5,6 +5,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { getCoopsService, isCoopsBodyError } from '@/services/coops/coops-service.js';
 import { COOPS_DATE_FORM, validateCoopsDateRange } from '@/services/coops/date-range.js';
 import { isSubordinateTideStation } from '@/services/coops/prediction-class.js';
@@ -371,16 +372,18 @@ export const noaaMarineGetTidePredictions = tool('noaa_marine_get_tide_predictio
 
   format: (result) => {
     const lines: string[] = [
-      `## Tide Predictions — ${result.station_name} (${result.station_id})`,
+      `## Tide Predictions — ${escapeMarkdownInline(result.station_name)} (${escapeMarkdownInline(result.station_id)})`,
       `**Datum:** ${result.datum} · **Units:** ${result.units}`,
       '',
     ];
 
     for (const p of result.predictions) {
       const typeStr = p.type
-        ? ` [${p.type === 'H' ? 'HIGH' : p.type === 'L' ? 'LOW' : p.type}]`
+        ? ` [${p.type === 'H' ? 'HIGH' : p.type === 'L' ? 'LOW' : escapeMarkdownInline(p.type)}]`
         : '';
-      lines.push(`${p.time}${typeStr}: ${p.height} ${result.units === 'metric' ? 'm' : 'ft'}`);
+      lines.push(
+        `${escapeMarkdownInline(p.time)}${typeStr}: ${p.height} ${result.units === 'metric' ? 'm' : 'ft'}`,
+      );
     }
 
     return [{ type: 'text', text: lines.join('\n') }];
