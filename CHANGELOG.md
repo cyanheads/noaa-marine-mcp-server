@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.6.2](changelog/0.6.x/0.6.2.md) — 2026-10-25
+
+Marine tool responses preserve literal station names, metadata, queries, and notices in Markdown, with framework 0.13.16 and refreshed dependencies.
+
 ## [0.6.1](changelog/0.6.x/0.6.1.md) — 2026-10-08
 
 Framework 0.13.14: error results carry a request ID, wrong-typed arguments such as numeric strings are repaired instead of rejected, and the Docker image installs dependencies on the build platform.
