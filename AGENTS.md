@@ -2,10 +2,10 @@
 
 **Server:** noaa-marine-mcp-server
 **Version:** 0.6.1
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.14`
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.16`
 **Engines:** Bun ≥1.4.0, Node ≥24.0.0
-**MCP SDK:** `@modelcontextprotocol/server` ^2.2.0 (protocol revisions 2026-07-28 and 2025-*)
-**Zod:** ^4.6.5
+**MCP SDK:** `@modelcontextprotocol/server` ^2.3.1 (resolved 2.4.0; protocol revisions 2026-07-28 and 2025-*)
+**Zod:** ^4.6.7
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
 
@@ -151,6 +151,8 @@ export function getServerConfig() {
 
 `parseEnvConfig` maps Zod schema paths → env var names so errors name the variable (`NOAA_APPLICATION_ID`) not the path (`applicationId`). Throws `ConfigurationError`, which the framework prints as a clean startup banner.
 
+For env booleans use `z.stringbool()`, never `z.coerce.boolean()` — `Boolean("false")` is `true`, so a coerced flag cannot be disabled through the environment. `z.stringbool()` parses `true/false/1/0/yes/no/on/off` and rejects anything else.
+
 ### Server identity and instructions
 
 This server's `createApp()` identity is the bare repository name in both `name` and `title`: `noaa-marine-mcp-server`. Never add `description` or `websiteUrl` — the framework derives canonical metadata from `package.json`, and a copy in `createApp()` is drift. `instructions` is optional server-level orientation sent to clients on every `initialize`; use it for deployment guidance and cross-tool workflows instead of repeating the same context across tool descriptions.
@@ -159,7 +161,7 @@ This server's `createApp()` identity is the bare repository name in both `name` 
 
 `createApp({ sessionMode: 'stateless' })` declares the HTTP session posture in `src/` rather than leaving it to a deployment's `MCP_SESSION_MODE`, which still wins whenever it carries a meaningful value (an empty string and an unsubstituted `${…}` placeholder read as unset and fall through to the option). Stateless is correct here: no tool gates on `ctx.requestInput`. A server that does gain one declares `{ default: 'stateful', require: 'stateful' }` so startup fails with a `ConfigurationError` instead of serving a mode a 2025-era HTTP client can never answer in. Stdio is never refused.
 
-`teardown(core)` is the `setup()` counterpart — it releases a watcher, socket, or non-`unref()`'d timer after the transport stops and before the logger closes. Neither service here allocates one (both hold an in-memory station cache and nothing else), so the hook is unused; add it the moment a service acquires a handle it must close. `SIGTERM`/`SIGINT` exit the process explicitly once shutdown settles.
+`teardown(core)` is the `setup()` counterpart — it releases a watcher, socket, or non-`unref()`'d timer after the transport stops and before the logger closes. Neither service here allocates one (both hold an in-memory station cache and nothing else), so the hook is unused; add it the moment a service acquires a handle it must close. `SIGTERM`/`SIGINT` exit the process explicitly once shutdown settles (0, or 1 if a step does not settle within the framework's 10-second ceiling).
 
 ---
 
@@ -169,13 +171,13 @@ Handlers receive a unified `ctx` object. Key properties:
 
 | Property | Description |
 |:---------|:------------|
-| `ctx.log` | Request-scoped logger — `.debug()`, `.info()`, `.notice()`, `.warning()`, `.error()`. Auto-correlates requestId, traceId, tenantId. Dual-sink: Pino and `notifications/message`, so treat it as client-visible. |
+| `ctx.log` | Request-scoped logger — `.debug()`, `.info()`, `.notice()`, `.warning()`, `.error()`. Auto-correlates requestId, traceId, tenantId. Dual-sink: Pino **and** `notifications/message` to the client, so treat it as client-visible. |
 | `ctx.state` | Tenant-scoped KV — `.get(key)`, `.set(key, value, { ttl? })`, `.delete(key)`, `.getMany(keys)`, `.list(prefix, { cursor, limit })`. Accepts any JSON-serializable value; reads return its JSON form (a `Date` comes back as an ISO string). |
-| `ctx.requestInput` | Suspend and ask the caller for more input. Return it; never await it. Always present, though this server currently has no call sites. |
-| `ctx.inputs` | The request's responses, limited to what the client declared (`elicitation` and its form/url modes, `sampling`, `roots`). Client-supplied: a consent gate trusts only a `ctx.state` record it stored when it asked (see the `api-context` skill). |
-| `ctx.clientCapabilities` | What the client declared for this request, `undefined` when no view exists. Never a reason to skip a consent prompt. |
-| `ctx.enrich` | Success-path agent context that reaches both `structuredContent` and `content[]` when the definition declares `enrichment`. |
-| `ctx.content` | Non-text image/audio content blocks prepended to `content[]`; never enters `structuredContent`. |
+| `ctx.requestInput` | Suspend and ask the caller for more input — `return ctx.requestInput({ inputRequests: { key: inputRequired.elicit({ message, requestedSchema }) } })`. Never returns; the handler is re-entered with the answers. Always present. |
+| `ctx.inputs` | The request's responses — `.accepted(key, schema)`, `.view(key)`, `.state()`, `.dropped` — limited to what the client declared (`elicitation` and its form/url modes, `sampling`, `roots`). Client-supplied: a consent gate trusts only a `ctx.state` record it stored when it asked, bound to the operation, caller, and target (see the `api-context` skill). |
+| `ctx.clientCapabilities` | What the client declared for this request, `undefined` when no view exists. Decides whether to ask for optional context (e.g. roots); never a reason to skip a consent prompt. |
+| `ctx.enrich` | Success-path agent context (empty-result notices, query echo, pagination totals) — `ctx.enrich(...)` or `.notice()` / `.total()` / `.echo()` / `.truncated()`. Reaches `structuredContent` and `content[]`; lands only when the definition declares an `enrichment` block (no-op otherwise). |
+| `ctx.content` | Non-text content blocks — `.image(data, mimeType)`, `.audio(data, mimeType)`, or `ctx.content(block)` for a raw block. Prepended to `content[]` after `format()`; never enters `structuredContent`. |
 | `ctx.signal` | `AbortSignal` for cancellation. |
 | `ctx.requestId` | Request ID — the one every log record of the call carries and its error envelope returns as `data.requestId`. |
 | `ctx.tenantId` | Tenant ID from JWT; `'default'` for stdio or HTTP with auth off. |
@@ -219,7 +221,7 @@ throw new Error('Invalid query format');     // → ValidationError
 
 // McpError — when no factory exists for the code
 import { McpError, JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-throw new McpError(JsonRpcErrorCode.DatabaseError, 'Connection failed', { pool: 'primary' });
+throw new McpError(JsonRpcErrorCode.InitializationFailed, 'Connection failed', { pool: 'primary' });
 ```
 
 See framework CLAUDE.md and the `api-errors` skill for the full auto-classification table, all available factories, and the contract reference.
@@ -348,6 +350,8 @@ When you complete a skill's checklist, check the boxes and add a completion time
 | `bun run bundle` | Build, pack, and clean a `.mcpb` for one-click Claude Desktop install |
 
 ---
+
+**CI is one file.** `.github/workflows/codeql.yml` is the only GitHub Actions workflow: CodeQL runs only while the repo's CodeQL default setup is turned off. Verification — `devcheck`, tests, and release gates — runs locally.
 
 ## Bundling
 
