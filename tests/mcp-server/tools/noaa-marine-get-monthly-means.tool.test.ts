@@ -107,7 +107,11 @@ function expectFailure(result: Result, code: number, reason: string): void {
   expect(errorOf(result).data?.reason).toBe(reason);
   expect(hintOf(result)).toBe(declared(reason));
   const text = textOf(result);
-  expect(text).toContain(`Recovery: ${declared(reason)}`);
+  const recoveryText =
+    reason === 'station_not_found'
+      ? 'Use noaa_marine_find_stations with types=\\["water_level"\\] to obtain a valid station ID.'
+      : declared(reason);
+  expect(text).toContain(`Recovery: ${recoveryText}`);
   expect(text).toContain(`(reason ${reason}`);
 }
 
