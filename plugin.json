@@ -1,0 +1,33 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "noaa-marine-mcp-server",
+  "version": "0.6.2",
+  "description": "Find NOAA tide stations and NDBC buoys, fetch tide predictions, water levels, tidal currents, and live buoy conditions via MCP. STDIO or Streamable HTTP.",
+  "author": {
+    "name": "Casey Hand",
+    "email": "casey@caseyjhand.com",
+    "url": "https://caseyjhand.com"
+  },
+  "homepage": "https://github.com/cyanheads/noaa-marine-mcp-server#readme",
+  "repository": "git+https://github.com/cyanheads/noaa-marine-mcp-server.git",
+  "license": "Apache-2.0",
+  "keywords": [
+    "noaa",
+    "marine",
+    "tides",
+    "ndbc",
+    "buoy",
+    "co-ops",
+    "water-level",
+    "currents",
+    "coastal",
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "typescript",
+    "bun",
+    "stdio",
+    "streamable-http",
+    "ai-agent"
+  ]
+}
