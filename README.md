@@ -1,7 +1,7 @@
 <div align="center">
   <h1>@cyanheads/noaa-marine-mcp-server</h1>
   <p><b>Find NOAA tide stations and NDBC buoys, fetch tide predictions, water levels, tidal currents, and live buoy conditions via MCP. STDIO or Streamable HTTP.</b>
-  <div>8 Tools • 1 Resource</div>
+  <div>8 Tools • 1 Resource • 1 Skill</div>
   </p>
 </div>
 
@@ -51,6 +51,10 @@ US tides, currents, water levels, and buoy observations from NOAA CO-OPS and NDB
 | `noaa-marine://station/{station_id}` | Metadata for a CO-OPS or NDBC station: name, coordinates, source, capabilities, prediction class, platform |
 
 Everything in the resource except NDBC `owner` is also on `noaa_marine_find_stations` rows, for clients that only call tools.
+
+### Agent skill
+
+The published [noaa-marine-guide](./skills/noaa-marine-guide/SKILL.md) skill carries the gates and conventions the tool descriptions don't: which station serves which tool, why a place-name search misses, the clock and direction differences between CO-OPS and NDBC, and what the server can't answer (forecasts, warnings, past buoy readings). MCP clients read it as `skill://noaa-marine-guide/SKILL.md` through the Skills extension. Plugin installs include it too.
 
 ## Capability reference
 
