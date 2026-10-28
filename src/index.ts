@@ -34,12 +34,13 @@ await createApp({
   ],
   resources: [noaaMarineStationResource],
   prompts: [],
+  skills: 'skills',
   cacheHints: {
     'tools/list': { ttlMs: 86_400_000, cacheScope: 'public' },
     'resources/list': { ttlMs: 86_400_000, cacheScope: 'public' },
     'resources/templates/list': { ttlMs: 86_400_000, cacheScope: 'public' },
   },
-  instructions: `US marine conditions from NOAA CO-OPS and NDBC: CO-OPS is coastal-gauge tide and tidal-current predictions plus observed water levels, NDBC is live buoy observation, and every water height is referenced to MLLW, the US nautical chart datum, unless another datum is requested. Start with noaa_marine_find_stations to resolve a place name, a coordinate pair, or a bare station number to a station ID — its types filter names what each station can serve, and an ID from one source never works on a tool that reads the other. That source split is also what separates the two current tools: noaa_marine_get_currents returns CO-OPS tidal-current predictions, noaa_marine_get_current_profile an observed NDBC ADCP measurement.`,
+  instructions: `US marine conditions from NOAA CO-OPS and NDBC: CO-OPS is coastal-gauge tide and tidal-current predictions plus observed water levels, NDBC is live buoy observation, and every water height is referenced to MLLW, the US nautical chart datum, unless another datum is requested. Start with noaa_marine_find_stations to resolve a coordinate pair, a station name, or a bare station number to a station ID (it matches station names, not places, so geocode a town or marina to coordinates first) — its types filter names what each station can serve, and an ID from one source never works on a tool that reads the other. That source split is also what separates the two current tools: noaa_marine_get_currents returns CO-OPS tidal-current predictions, noaa_marine_get_current_profile an observed NDBC ADCP measurement.`,
 
   setup(core) {
     const serverConfig = getServerConfig();
