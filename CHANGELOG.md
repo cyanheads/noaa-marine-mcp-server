@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.7.0](changelog/0.7.x/0.7.0.md) — 2026-10-28
+
+Publishes the noaa-marine-guide skill over MCP, fixes the per-request HTTP memory retention that framework 0.13.16 introduced, and moves to framework 0.13.18.
+
 ## [0.6.2](changelog/0.6.x/0.6.2.md) — 2026-10-25
 
 Marine tool responses preserve literal station names, metadata, queries, and notices in Markdown, with framework 0.13.16 and refreshed dependencies.
