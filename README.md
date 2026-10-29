@@ -60,9 +60,9 @@ The published [noaa-marine-guide](./skills/noaa-marine-guide/SKILL.md) skill car
 
 ### `noaa_marine_find_stations` <sub>tool</sub>
 
-- Filters combine: `latitude` + `longitude` with `radius_km` (default 100, max 1000), `query` (name or ID substring on both sources; an exact ID leads unless sorting by distance), `state` (CO-OPS only), `source` (`coops` / `ndbc` / `all`), and `types` (`tide`, `current`, `water_level`, `met`, `current_profile`, `water_quality`, or the platform class `buoy`); `limit` defaults to 20, max 200
+- Filters combine: `latitude` + `longitude` with `radius_km` (default 100, max 1000), `query` (name or ID substring on both sources; an exact ID leads unless sorting by distance), `state` (CO-OPS only), `source` (`coops` / `ndbc` / `all`), and `types` (`tide`, `current`, `water_level`, `met`, `current_profile`, `water_quality`, or the platform class `buoy`); `limit` defaults to 20, and a larger value is clamped to 200 with a notice (rejected when `NOAA_CLAMP_LIMITS=false`); `offset` pages past one page
 - Each station carries `source`, `capabilities`, `type`, and for NDBC a `platform`; CO-OPS rows add `state` (`state_derived: true` when borrowed from the nearest state-bearing station within 25 km), a tide `prediction_class` (`reference`, or `subordinate` with `reference_id`), and current `bins[]` giving each bin's number, depth in feet, and class
-- `total_found` and `truncated` report the count before `limit`; zero matches is a success with `applied_search`, a partial catalog read is flagged in `sources`, and total catalog failure is `sources_unavailable`; only one of `latitude`/`longitude` is `incomplete_coordinates`
+- `total_found` counts every match across pages; `truncated` and `next_offset` appear while matches remain past the page; zero matches is a success with `applied_search`, a partial catalog read is flagged in `sources`, and total catalog failure is `sources_unavailable`; only one of `latitude`/`longitude` is `incomplete_coordinates`
 
 ---
 
@@ -70,7 +70,7 @@ The published [noaa-marine-guide](./skills/noaa-marine-guide/SKILL.md) skill car
 
 - `interval` `hilo` (default) or `6min`, up to 365 days; ten datums (MLLW, MHHW, MHW, MTL, MSL, MLW, DTL, NAVD, STND, CRD), `time_zone` (`lst_ldt`, `gmt`, `lst`), and `units` (`english` feet, `metric` meters)
 - `6min` works at reference stations only: a subordinate station fails as `subordinate_no_6min` naming its reference station, and a Great Lakes station is `no_predictions`, pointing to `noaa_marine_get_water_level`
-- Other failures: `invalid_date_range`, `date_range_exceeded`, `station_not_found`, `datum_unavailable` (naming the planes the station carries), and `upstream_throttled`, a retryable CO-OPS HTTP 403 that clears in a couple of minutes
+- Other failures: `invalid_date_range`, `date_range_exceeded`, `station_not_found`, `datum_unavailable` (its hint names a datum to retry with, never the one just rejected), and `upstream_throttled`, a retryable CO-OPS HTTP 403 that clears in a couple of minutes
 
 ---
 
@@ -78,7 +78,7 @@ The published [noaa-marine-guide](./skills/noaa-marine-guide/SKILL.md) skill car
 
 - `interval` `6min` (default, 31 days), `hourly` or `high_low` (365 days), or `daily_mean` (3,655 days, Great Lakes only, always in LST; a coastal station is `great_lakes_only`); thirteen datums (MLLW, MHHW, MHW, MTL, MSL, MLW, NAVD, STND, IGLD, LWD, CRD, LWI, HWI)
 - Observations carry `quality` (`p` / `v`, `6min` only), `sigma` (`6min` and `hourly`), and `type` (`H` / `HH` / `L` / `LL`, `high_low` only); slots with no reading are dropped and counted in `gaps_dropped`
-- Paired predictions at the matching cadence (none on `daily_mean`), with `predictions_status` (`empty` / `unavailable`) explaining an empty series; `residual_summary` (`max_surge`, `max_drawdown`) covers the whole matched range, on `6min` and `hourly` only. Failures: `invalid_date_range`, `date_range_exceeded`, `station_not_found`, `datum_unavailable`, `no_data`, `verified_data_lag` (a coarser-cadence window ending on or after the first day of the prior month, which CO-OPS may not have verified yet), and `upstream_throttled`
+- Paired predictions at the matching cadence (none on `daily_mean`), with `predictions_status` (`empty` / `unavailable`) explaining an empty series; `residual_summary` (`max_surge`, `max_drawdown`) covers the whole matched range, on `6min` and `hourly` only. Failures: `invalid_date_range`, `date_range_exceeded`, `station_not_found`, `datum_unavailable`, `no_gauge`, `future_window` (`begin_date` after the station's current date in the requested `time_zone`), `no_data`, `verified_data_lag` (a coarser-cadence window ending on or after the first day of the prior month, which CO-OPS may not have verified yet), and `upstream_throttled`
 
 ---
 
@@ -86,7 +86,7 @@ The published [noaa-marine-guide](./skills/noaa-marine-guide/SKILL.md) skill car
 
 - Up to 73,000 days per request; eleven datums (MLLW, MHHW, MHW, MTL, MSL, MLW, NAVD, STND, IGLD, LWD, CRD) in `english` feet or `metric` meters; the first and last months returned are those `begin_date` and `end_date` fall in
 - One row per month: `highest`, `lowest`, the tidal datums (`mhhw`, `mhw`, `msl`, `mtl`, `mlw`, `mllw`, `dtl`), ranges (`gt`, `mn`, `dhq`, `dlq`), lunitidal intervals in hours (`hwi`, `lwi`), and the `inferred` code verbatim; values CO-OPS leaves blank are omitted, so a Great Lakes station carries only `highest`, `msl`, and `lowest`
-- Failures: `invalid_date_range`, `date_range_exceeded`, `station_not_found`, `datum_unavailable`, `upstream_throttled`, and for an empty window `verified_data_lag` when it ends on or after the first day of the prior month, `no_data` otherwise
+- Failures: `invalid_date_range`, `date_range_exceeded`, `station_not_found`, `datum_unavailable`, `no_gauge`, `upstream_throttled`, and for an empty window `verified_data_lag` when it ends on or after the first day of the prior month, `no_data` otherwise
 
 ---
 
@@ -101,7 +101,8 @@ The published [noaa-marine-guide](./skills/noaa-marine-guide/SKILL.md) skill car
 ### `noaa_marine_get_conditions` <sub>tool</sub>
 
 - One NDBC `station_id`; returns wind, waves, sea-surface and air temperature, dew point, and pressure in SI units, except `tide_ft` and `visibility_nmi`
-- Every sensor field is nullable; each column block comes from the newest row within 90 minutes that carried it, waves reporting their own `waves_observed_at` and any other older block named in `notice`. Failures: `buoy_not_found`, `no_sensor_data`
+- A 7-digit CO-OPS station ID also works when NDBC relays that gauge's met sensors under a station of its own: `station_id` is then the NDBC station read, the requested ID comes back as `coops_station_id`, and `notice` names both
+- Every sensor field is nullable; each column block comes from the newest row within 90 minutes that carried it, waves reporting their own `waves_observed_at` and any other older block named in `notice`. Failures: `buoy_not_found` (no observation file and no relay, a relay with no file, or several relays the met flag doesn't settle), `no_sensor_data`
 
 ---
 
@@ -131,14 +132,14 @@ Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core): s
 CO-OPS / NDBC-specific:
 
 - CO-OPS data and metadata APIs plus the NDBC active-stations catalog and `realtime2` feeds (`.txt`, `.adcp`, `.ocean`), with station catalogs cached in memory for 6 hours; CO-OPS requests carry `application=` from `NOAA_APPLICATION_ID`
-- Station IDs never cross sources: CO-OPS tide and water-level IDs are numeric (`9447130`), CO-OPS current IDs alphanumeric (`ACT4176`), NDBC IDs 5-character codes (`46041`)
-- CO-OPS tools take `begin_date` / `end_date` as `YYYYMMDD` or `YYYY-MM-DD` and check the calendar and each tool's range ceiling before calling (`invalid_date_range`, `date_range_exceeded`); heights default to MLLW, and a datum the station lacks is `datum_unavailable` naming ones it carries
+- Station IDs belong to one source, with one exception: CO-OPS tide and water-level IDs are numeric (`9447130`), CO-OPS current IDs alphanumeric (`ACT4176`), NDBC IDs mostly 5-character codes (`46041`) with some 7-digit numbers, and only `noaa_marine_get_conditions` reads a CO-OPS ID, through its NDBC relay
+- CO-OPS tools take `begin_date` / `end_date` as `YYYYMMDD` or `YYYY-MM-DD` and check the calendar and each tool's range ceiling before calling (`invalid_date_range`, `date_range_exceeded`); heights default to MLLW, a datum a station lacks is `datum_unavailable` with a hint naming a datum to retry with, never the rejected one, and a station that has never had a water-level gauge is `no_gauge`
 - CO-OPS verifies `hourly`, `high_low`, `daily_mean`, and monthly means once a month, for the prior month: an empty window ending on or after the first of the prior month is `verified_data_lag`, an earlier one `no_data`
 - CO-OPS answers a burst of requests with HTTP 403 for about two minutes; the CO-OPS data tools report it as a retryable `upstream_throttled` whose recovery names the wait
 
 Agent-friendly output:
 
-- Byte-bounded paging on the four CO-OPS series tools: a range that fits returns whole, and a longer one returns a leading page with `rows_matched`, `rows_returned`, `page_offset`, and `next_offset`, walked with `offset` (`limit` shrinks a page)
+- Count paging on the four CO-OPS series tools: a page is `limit` rows from `offset`, defaulting to 50 (24 for monthly means) with a larger value clamped to 1,000 and a notice; a range of at most `limit` rows returns whole, and a longer one adds `rows_matched`, `rows_returned`, `page_offset`, and `next_offset`
 - Missing means `null` or omitted, never fabricated: NDBC `MM` markers become `null`, blank CO-OPS values are dropped, and `quality` is left out rather than defaulted
 - Discriminated fields: station `source` (`coops` | `ndbc`), capability `type`, NDBC `platform`, and `prediction_class`, with datum and units echoed on every CO-OPS height response, so callers branch on data, not string parsing
 
@@ -176,6 +177,7 @@ No API key: NOAA CO-OPS and NDBC are open data sources. For Docker or a source b
 | Variable | Description | Default |
 |:---------|:------------|:--------|
 | `NOAA_APPLICATION_ID` | Courtesy identifier sent as `application=` on CO-OPS requests. | `noaa-marine-mcp-server` |
+| `NOAA_CLAMP_LIMITS` | Clamp a `limit` above its cap (1,000 series rows, 200 stations) to the cap with a notice. `false` enforces each cap as a schema maximum. | `true` |
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
 | `MCP_HTTP_PORT` | HTTP server port. | `3010` |
 | `MCP_HTTP_HOST` | HTTP bind address. | `127.0.0.1` |
@@ -235,7 +237,7 @@ The image defaults to HTTP transport, stateless session mode, and logs to `/var/
 | Path | Purpose |
 |:-----|:--------|
 | `src/index.ts` | `createApp()` entry point: registers the tools and resource, initializes services. |
-| `src/config/` | `NOAA_APPLICATION_ID` env var parsing with Zod. |
+| `src/config/` | `NOAA_APPLICATION_ID` and `NOAA_CLAMP_LIMITS` env var parsing with Zod. |
 | `src/services/coops/` | CO-OPS client: station catalog cache, data fetch, error classification, date-range validation, row paging, state resolution. |
 | `src/services/ndbc/` | NDBC service: active-stations XML and `realtime2` feed parsers. |
 | `src/services/geo.ts` | Haversine distance for proximity search and state resolution. |

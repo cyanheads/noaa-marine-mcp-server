@@ -107,7 +107,7 @@ export const noaaMarineStationResource = resource('noaa-marine://station/{statio
   mimeType: 'application/json',
   cacheHint: { ttlMs: 21_600_000, cacheScope: 'public' },
   params: z.object({
-    station_id: z.string().describe('CO-OPS numeric/alphanumeric ID or 5-char NDBC buoy ID.'),
+    station_id: z.string().describe('CO-OPS numeric/alphanumeric ID or NDBC station ID.'),
   }),
   async handler(params, ctx) {
     const coopsSvc = getCoopsService();
@@ -234,13 +234,13 @@ See framework CLAUDE.md and the `api-errors` skill for the full auto-classificat
 src/
   index.ts                              # createApp() entry point — registers tools, resource, services
   config/
-    server-config.ts                    # NOAA_APPLICATION_ID env var (optional, defaults to server name)
+    server-config.ts                    # NOAA_APPLICATION_ID (optional, defaults to server name) and NOAA_CLAMP_LIMITS env vars
   services/
     coops/
-      coops-service.ts                  # CO-OPS Tides & Currents API (station cache, resolved-state cache, data fetch, message classifier, 403 throttle mapping)
-      date-range.ts                     # YYYYMMDD / YYYY-MM-DD calendar validation, compaction, and span, shared by the date-ranged tools; the verification-lag window rule
+      coops-service.ts                  # CO-OPS Tides & Currents API (station cache, resolved-state cache, data fetch, message classifier, 403 throttle mapping, water-level gauge lookup)
+      date-range.ts                     # YYYYMMDD / YYYY-MM-DD calendar validation, compaction, and span, shared by the date-ranged tools; the verification-lag window rule and the future-window rule
       prediction-class.ts               # Decodes the catalog `type` letter into a prediction class
-      row-page.ts                       # Byte-bounded row paging shared by the time-series tools
+      row-page.ts                       # Count-based row paging shared by the time-series tools
       station-state.ts                  # State codes; resolves each station's state (published, else nearest state-bearing row within 25 km)
       types.ts                          # CO-OPS domain types
     geo.ts                              # Haversine distance, shared by proximity search and state resolution
@@ -248,6 +248,8 @@ src/
       ndbc-service.ts                   # NDBC buoy service (active stations XML, realtime text)
       types.ts                          # NDBC domain types
   mcp-server/
+    tools/
+      limit-clamp.ts                    # Default and cap of each count input, the clamped `limit` schema, `offset` schema
     tools/definitions/
       noaa-marine-find-stations.tool.ts        # noaa_marine_find_stations
       noaa-marine-get-tide-predictions.tool.ts # noaa_marine_get_tide_predictions

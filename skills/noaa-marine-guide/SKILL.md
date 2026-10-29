@@ -4,7 +4,7 @@ description: Gates and conventions for the noaa_marine_* tools (NOAA CO-OPS tide
 license: Apache-2.0
 metadata:
   author: cyanheads
-  version: "1.0"
+  version: "1.1"
 ---
 
 ## Scope
@@ -23,15 +23,15 @@ Reach elsewhere for:
 |:--|:--|:--|
 | Numeric, e.g. `9447130` | CO-OPS tide or water-level station | `capabilities` decides: `tide` → tide predictions; `water_level` → water level and monthly means |
 | Alphanumeric, e.g. `PUG1515`, plus a bin number | CO-OPS current station | `noaa_marine_get_currents`, with `bin` taken from that station's `bins[]` |
-| 5 characters, e.g. `46041`, `FRDW1` | NDBC station | `capabilities` decides: `met` → conditions; `current_profile` → current profile; `water_quality` → ocean observations |
+| Mostly 5 characters, e.g. `46041`, `FRDW1`; some are 7-digit numbers | NDBC station | `capabilities` decides: `met` → conditions; `current_profile` → current profile; `water_quality` → ocean observations |
 
-- NDBC relays many CO-OPS gauges under its own ID, and the NDBC station's name starts with the CO-OPS number: `FRDW1` is named `9449880 - Friday Harbor, WA`. A `query` for a CO-OPS number therefore returns the CO-OPS row first, followed by any NDBC relay. When the gauge also reports wind and air data, the relay's ID is the one `noaa_marine_get_conditions` reads.
+- NDBC relays many CO-OPS gauges under its own ID, and the NDBC station's name starts with the CO-OPS number: `FRDW1` is named `9449880 - Friday Harbor, WA`. A `query` for a CO-OPS number therefore returns the CO-OPS row first, followed by any NDBC relay. When the gauge also reports wind and air data, `noaa_marine_get_conditions` reads either ID: the CO-OPS number resolves to the relay, returning the relay as `station_id` and the CO-OPS number as `coops_station_id`. Every other NDBC tool takes the NDBC ID only.
 - A tide station is not necessarily a gauge. Most tide-prediction stations are prediction-only, and only those whose `capabilities` include `water_level` have observations.
 
 ## Gates
 
 1. **`query` is not a geocoder.** It matches a substring of station names and IDs. A marina, beach, or town that no station is named after comes back `total_found: 0`, which doesn't mean there's no station nearby. Resolve the place to coordinates with a geocoding tool, then search by `latitude`/`longitude`.
-2. **Observations need a gauge.** Before calling `noaa_marine_get_water_level` or `noaa_marine_get_monthly_means`, confirm the station's `capabilities` include `water_level`. At a prediction-only station, the water-level call fails as `datum_unavailable` even for MLLW, and a retry with STND fails too. Don't work through the datum list; switch to the nearest `water_level` station.
+2. **Observations need a gauge.** Before calling `noaa_marine_get_water_level` or `noaa_marine_get_monthly_means`, confirm the station's `capabilities` include `water_level`. At a station that has never had a gauge, the water-level call fails as `no_gauge`, pointing to `noaa_marine_find_stations` and `noaa_marine_get_tide_predictions`; a retired gauge, which `capabilities` also omits, serves observations only for its record years. Switch to the nearest `water_level` station, or read predictions.
 3. **Predictions carry no weather.** Storm surge and wind-driven drawdown show up only in observations, as the residual against prediction. To answer what the water is doing now, or what it did during a storm, read observations, not predictions.
 4. **Never call a passage safe.** The server has no forecast or warning product. For a go/no-go question, give the predicted timing and the latest buoy observation with its `observed_at`, label which is which, and send the user to NWS marine forecasts and warnings for the decision.
 5. **Put both sources on one clock.** CO-OPS tools default to `lst_ldt`, the station's local time. NDBC times are UTC. Before you compare a buoy reading with a tide or current event, or merge them into one timeline, pass `time_zone: "gmt"` to the CO-OPS call or convert the NDBC time.
@@ -58,6 +58,6 @@ Present all results on one clock (Gate 5) and in one unit system.
 
 **Storm surge.** Pick a `water_level` station (Gate 2) and call `noaa_marine_get_water_level` at `6min` or `hourly`. Those are the two intervals that report `residual_summary`. CO-OPS publishes `hourly` only after monthly verification, so a window ending this month or last returns `verified_data_lag`; for a storm in progress or a recent one, use `6min`. `max_surge` is the largest amount the observed level rose above prediction. Request MHHW to read the observed heights as water above typical high tide.
 
-**Long-term sea level.** Call `noaa_marine_get_monthly_means` over decades and walk `next_offset` until it is null. Keep the datum and units the same on every page. The trend is read from `msl`. The server publishes no fitted trend, so fit it yourself and state the span you used.
+**Long-term sea level.** Call `noaa_marine_get_monthly_means` over decades, raising `limit` (up to 1,000) to read them in one call rather than walking 24-month pages with `next_offset`. Keep the datum and units the same on every page. The trend is read from `msl`. The server publishes no fitted trend, so fit it yourself and state the span you used.
 
 **Currents at depth.** For predicted flood, ebb, and slack timing at a depth, call `noaa_marine_get_currents` with a `bin`. In `bins[]` on the station search, depth is in feet. For what the water column is measured doing now, call `noaa_marine_get_current_profile` (depth in m, speed in cm/s, direction toward). The two come from different stations and different IDs, so convert units before comparing.
