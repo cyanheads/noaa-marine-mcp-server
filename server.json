@@ -29,6 +29,13 @@
           "default": "noaa-marine-mcp-server"
         },
         {
+          "name": "NOAA_CLAMP_LIMITS",
+          "description": "Clamp a limit above its cap (1000 rows on the series tools, 200 stations on noaa_marine_find_stations) to the cap with a notice. Set false to advertise and enforce each cap as a schema maximum instead.",
+          "format": "string",
+          "isRequired": false,
+          "default": "true"
+        },
+        {
           "name": "MCP_LOG_LEVEL",
           "description": "Sets the minimum log level for output (e.g., 'debug', 'info', 'warn').",
           "format": "string",
@@ -59,6 +66,13 @@
           "format": "string",
           "isRequired": false,
           "default": "noaa-marine-mcp-server"
+        },
+        {
+          "name": "NOAA_CLAMP_LIMITS",
+          "description": "Clamp a limit above its cap (1000 rows on the series tools, 200 stations on noaa_marine_find_stations) to the cap with a notice. Set false to advertise and enforce each cap as a schema maximum instead.",
+          "format": "string",
+          "isRequired": false,
+          "default": "true"
         },
         {
           "name": "MCP_HTTP_HOST",

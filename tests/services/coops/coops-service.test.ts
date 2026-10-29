@@ -8,7 +8,11 @@
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createFetchMock, createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { getCoopsService, initCoopsService } from '@/services/coops/coops-service.js';
+import {
+  datumRetryHint,
+  getCoopsService,
+  initCoopsService,
+} from '@/services/coops/coops-service.js';
 import { type CoopsEndpoint, callsTo, installCoopsFake } from '../../support/coops-http.js';
 
 /** A live `MAX_SLACK` envelope: `Velocity_Major` and the mean bearings are JSON numbers, `Bin` and `Depth` strings. */
@@ -529,6 +533,278 @@ describe('CoopsService coarse water-level products', () => {
       http.restore();
     }
   });
+});
+
+// --- #50: a station whose datum CO-OPS rejects may have never had a gauge at all ---
+
+/** Live catalog rows, trimmed to the fields the lookups read. */
+const HONOLULU = {
+  id: '1612340',
+  name: 'Honolulu',
+  lat: 21.303333,
+  lng: -157.86453,
+  greatlakes: false,
+  timezonecorr: -10,
+  observedst: false,
+};
+/** Port Allen: a retired gauge (1988–1997), listed in `historicwl` but not `waterlevels`. */
+const PORT_ALLEN = {
+  id: '1611347',
+  name: 'PORT ALLEN, HANAPEPE BAY, KAUAI ISLAND',
+  lat: 21.9033,
+  lng: -159.592,
+  greatlakes: false,
+  timezonecorr: -10,
+  observedst: false,
+};
+/** Waimea Bay: a subordinate tide-prediction station that has never had a gauge. */
+const WAIMEA_TIDE = {
+  id: '1611401',
+  name: 'Waimea Bay',
+  lat: 21.9567,
+  lng: -159.673,
+  type: 'S',
+  reference_id: '1611400',
+};
+
+/** One answer per catalog type: a station list, or an HTTP status that fails the read. */
+type CatalogAnswers = Partial<Record<string, readonly Record<string, unknown>[] | number>>;
+
+const LIVE_CATALOGS: CatalogAnswers = {
+  waterlevels: [HONOLULU],
+  historicwl: [HONOLULU, PORT_ALLEN],
+  tidepredictions: [WAIMEA_TIDE, { ...PORT_ALLEN, type: 'R' }, { ...HONOLULU, type: 'R' }],
+};
+
+/** A CO-OPS upstream answering the catalog per type; the data endpoint fails the test. */
+function catalogFake(answers: CatalogAnswers) {
+  return installCoopsFake((endpoint, url) => {
+    if (endpoint !== 'catalog') throw new Error(`Unexpected CO-OPS ${endpoint} request: ${url}`);
+    const answer = answers[url.searchParams.get('type') ?? ''];
+    if (answer === undefined) throw new Error(`Unexpected catalog request: ${url}`);
+    return typeof answer === 'number'
+      ? new Response('catalog error', { status: answer })
+      : Response.json({ stations: answer });
+  });
+}
+
+/** The catalog types requested, in order. */
+function catalogTypes(http: ReturnType<typeof installCoopsFake>): (string | null)[] {
+  return callsTo(http, 'catalog').map((url) => url.searchParams.get('type'));
+}
+
+describe('CoopsService.lookupGauge', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    setup();
+  });
+
+  it('answers an active gauge from waterlevels alone, reading no other catalog', async () => {
+    const http = catalogFake(LIVE_CATALOGS);
+    try {
+      const gauge = await getCoopsService().lookupGauge('1612340', createMockContext());
+      expect(gauge).toMatchObject({ kind: 'gauge', station: { id: '1612340' } });
+      expect(catalogTypes(http)).toEqual(['waterlevels']);
+    } finally {
+      http.restore();
+    }
+  });
+
+  it('answers a retired gauge absent from waterlevels from historicwl', async () => {
+    const http = catalogFake(LIVE_CATALOGS);
+    try {
+      const gauge = await getCoopsService().lookupGauge('1611347', createMockContext());
+      expect(gauge).toMatchObject({ kind: 'gauge', station: { id: '1611347' } });
+      expect(catalogTypes(http)).toEqual(['waterlevels', 'historicwl']);
+    } finally {
+      http.restore();
+    }
+  });
+
+  it('carries the greatlakes flag of a gauge found only in historicwl', async () => {
+    const retiredLakeGauge = {
+      id: '9099999',
+      name: 'Retired lake gauge',
+      lat: 47,
+      lng: -91,
+      greatlakes: true,
+    };
+    const http = catalogFake({ waterlevels: [HONOLULU], historicwl: [retiredLakeGauge] });
+    try {
+      const gauge = await getCoopsService().lookupGauge('9099999', createMockContext());
+      expect(gauge).toMatchObject({ kind: 'gauge', station: { greatlakes: true } });
+    } finally {
+      http.restore();
+    }
+  });
+
+  it('reports no gauge for a station in neither water-level catalog, with its tide row', async () => {
+    const http = catalogFake(LIVE_CATALOGS);
+    try {
+      const gauge = await getCoopsService().lookupGauge('1611401', createMockContext());
+      expect(gauge).toEqual({ kind: 'no_gauge', tideStation: WAIMEA_TIDE });
+      expect(catalogTypes(http)).toEqual(['waterlevels', 'historicwl', 'tidepredictions']);
+    } finally {
+      http.restore();
+    }
+  });
+
+  it('reports no gauge without a tide row when tidepredictions does not list the station', async () => {
+    const http = catalogFake({ ...LIVE_CATALOGS, tidepredictions: [] });
+    try {
+      expect(await getCoopsService().lookupGauge('1611401', createMockContext())).toEqual({
+        kind: 'no_gauge',
+      });
+    } finally {
+      http.restore();
+    }
+  });
+
+  it('still reports no gauge when tidepredictions cannot be read, naming no tide station', async () => {
+    const http = catalogFake({ ...LIVE_CATALOGS, tidepredictions: 404 });
+    try {
+      expect(await getCoopsService().lookupGauge('1611401', createMockContext())).toEqual({
+        kind: 'no_gauge',
+      });
+    } finally {
+      http.restore();
+    }
+  });
+
+  it('is unknown when historicwl cannot be read, so the datum retry stands', async () => {
+    const http = catalogFake({ ...LIVE_CATALOGS, historicwl: 404 });
+    try {
+      expect(await getCoopsService().lookupGauge('1611401', createMockContext())).toEqual({
+        kind: 'unknown',
+      });
+      expect(catalogTypes(http)).toEqual(['waterlevels', 'historicwl']);
+    } finally {
+      http.restore();
+    }
+  });
+
+  it('is unknown when waterlevels cannot be read, and reads nothing after it', async () => {
+    // Six active gauges are absent from historicwl, so historicwl alone cannot rule a gauge out.
+    const http = catalogFake({ ...LIVE_CATALOGS, waterlevels: 404 });
+    try {
+      expect(await getCoopsService().lookupGauge('1611401', createMockContext())).toEqual({
+        kind: 'unknown',
+      });
+      expect(catalogTypes(http)).toEqual(['waterlevels']);
+    } finally {
+      http.restore();
+    }
+  });
+
+  it('serves historicwl from the catalog cache on the next lookup', async () => {
+    const http = catalogFake(LIVE_CATALOGS);
+    try {
+      const svc = getCoopsService();
+      await svc.lookupGauge('1611401', createMockContext());
+      await svc.lookupGauge('1611347', createMockContext());
+      expect(catalogTypes(http)).toEqual(['waterlevels', 'historicwl', 'tidepredictions']);
+    } finally {
+      http.restore();
+    }
+  });
+});
+
+describe('CoopsService.findStation', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    setup();
+  });
+
+  it('tells a station the catalog does not list (null) from a catalog it could not read (undefined)', async () => {
+    const http = catalogFake({ waterlevels: [HONOLULU], historicwl: 404 });
+    try {
+      const svc = getCoopsService();
+      expect(await svc.findStation('waterlevels', '1612340', createMockContext())).toEqual(
+        HONOLULU,
+      );
+      expect(await svc.findStation('waterlevels', '1611401', createMockContext())).toBeNull();
+      expect(await svc.findStation('historicwl', '1611401', createMockContext())).toBeUndefined();
+    } finally {
+      http.restore();
+    }
+  });
+
+  it('gives up as unreadable when its own deadline fires, sending no further attempt', async () => {
+    const deadline = new AbortController();
+    // The first attempt fails transiently; the deadline fires before the retry would be sent.
+    const http = installCoopsFake(() => {
+      deadline.abort(new DOMException('Lookup budget spent', 'TimeoutError'));
+      return new Response('upstream down', { status: 503 });
+    });
+    try {
+      const ctx = createMockContext();
+      const found = await getCoopsService().findStation(
+        'historicwl',
+        '1611401',
+        ctx,
+        deadline.signal,
+      );
+      expect(found).toBeUndefined();
+      expect(ctx.signal.aborted).toBe(false);
+      expect(callsTo(http, 'catalog')).toHaveLength(1);
+    } finally {
+      http.restore();
+    }
+  });
+
+  it("rethrows the caller's cancellation instead of reading it as an unreadable catalog", async () => {
+    const caller = new AbortController();
+    const http = installCoopsFake(() => {
+      caller.abort(new DOMException('Client cancelled', 'AbortError'));
+      return new Response('upstream down', { status: 503 });
+    });
+    try {
+      const ctx = createMockContext({ signal: caller.signal });
+      // A degraded lookup resolves undefined; a cancelled one must reject.
+      await expect(
+        getCoopsService().findStation('historicwl', '1611401', ctx),
+      ).rejects.toBeInstanceOf(Error);
+      expect(callsTo(http, 'catalog')).toHaveLength(1);
+    } finally {
+      http.restore();
+    }
+  });
+
+  it('rethrows a cancellation that arrives during a gauge lookup', async () => {
+    const caller = new AbortController();
+    const http = installCoopsFake((_endpoint, url) => {
+      if (url.searchParams.get('type') === 'waterlevels') return Response.json({ stations: [] });
+      caller.abort(new DOMException('Client cancelled', 'AbortError'));
+      return new Response('upstream down', { status: 503 });
+    });
+    try {
+      const ctx = createMockContext({ signal: caller.signal });
+      // Not { kind: 'unknown' } — the caller is gone, so nothing is answered.
+      await expect(getCoopsService().lookupGauge('1611401', ctx)).rejects.toBeInstanceOf(Error);
+    } finally {
+      http.restore();
+    }
+  });
+});
+
+describe('datumRetryHint', () => {
+  it.each([
+    ['MLLW', false, ['STND'], ['MLLW']],
+    ['MHHW', false, ['MLLW', 'STND'], ['MHHW']],
+    ['NAVD', false, ['NAVD88', 'MLLW', 'STND'], ['NAVD']],
+    ['MLLW', true, ['STND', 'IGLD', 'LWD', 'Great Lakes'], ['MLLW']],
+    ['IGLD', true, ['STND', 'LWD'], ['IGLD']],
+  ] as const)(
+    'after %s is rejected (Great Lakes: %s) names %j and never %j',
+    (rejected, greatLakes, named, absent) => {
+      const hint = datumRetryHint('1612340', rejected, greatLakes);
+      expect(hint).toContain('1612340');
+      for (const datum of named) expect(hint).toContain(datum);
+      // The rejected datum appears only in the sentence saying the station lacks it, if at all.
+      const retry = hint.slice(hint.indexOf('Retry with'));
+      for (const datum of absent) expect(retry).not.toContain(datum);
+    },
+  );
 });
 
 // --- #37: an HTTP 403 is CO-OPS throttling this address, not a bad request ---

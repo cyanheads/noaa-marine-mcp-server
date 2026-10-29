@@ -19,7 +19,8 @@
       "env": {
         "MCP_TRANSPORT_TYPE": "stdio",
         "MCP_AUTH_MODE": "none",
-        "NODE_ENV": "production"
+        "NODE_ENV": "production",
+        "NOAA_CLAMP_LIMITS": "${user_config.NOAA_CLAMP_LIMITS}"
       }
     }
   },
@@ -28,5 +29,13 @@
   },
   "tools_generated": true,
   "prompts_generated": true,
-  "user_config": {}
+  "user_config": {
+    "NOAA_CLAMP_LIMITS": {
+      "type": "string",
+      "title": "Clamp limits",
+      "description": "Clamp a limit above its cap (1000 rows on the series tools, 200 stations on noaa_marine_find_stations) to the cap with a notice. Set false to advertise and enforce each cap as a schema maximum instead. Leave blank for true.",
+      "default": "",
+      "required": false
+    }
+  }
 }

@@ -6,6 +6,7 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
+import { clampLimit, limitSchema, offsetSchema } from '@/mcp-server/tools/limit-clamp.js';
 import { getCoopsService, isCoopsThrottled } from '@/services/coops/coops-service.js';
 import { currentPredictionClass, tidePredictionClass } from '@/services/coops/prediction-class.js';
 import { STATE_CODES } from '@/services/coops/station-state.js';
@@ -184,7 +185,7 @@ function describeEmptySearch(applied: AppliedSearch): string {
 
 export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
   title: 'Find Marine Stations',
-  description: `Find CO-OPS tide, water-level and current stations and NDBC buoys near a location, by name, or by station ID, returning a unified list with source, data capabilities, coordinates, and — for NDBC — the physical platform class. This is the required first step for resolving a coordinate pair, a station name, or a bare station number to the station IDs the data tools take (query matches station names and IDs, not places, so a town or marina no station is named after needs geocoding to coordinates first): CO-OPS tide and water-level IDs are numeric (e.g. 9447130 for Seattle), CO-OPS current IDs are alphanumeric (e.g. ACT4176), and NDBC buoy IDs are 5-character alphanumeric codes (e.g. 46041). Two axes are reported separately — capabilities and type name the data products a station serves (tide, current, water_level, met, current_profile, water_quality), while platform is the NDBC physical classification (buoy, fixed, oilrig, dart, tao, usv, other) that CO-OPS stations do not carry. Supply latitude and longitude together for a proximity search, or query for a name-or-ID substring matched against both sources, or state for CO-OPS coverage in one state; the filters combine, and results lead with an exact ID match unless a proximity search is ordering them by distance. A search that matches nothing is a success with total_found: 0 carrying an echo of the filters that were applied, and a search whose catalogs did not all answer says which source is missing. CO-OPS prediction stations carry a third axis as well, prediction_class, which says what a station can actually answer: a tide station is either reference, serving both hilo and the 6-minute curve, or subordinate, serving hilo only, while a current station carries its class per depth bin in bins[] — a harmonic or subordinate bin serves the normal flood/ebb/slack series, and a weak_and_variable bin may instead answer noaa_marine_get_currents with a coverage statement and no events, or report that CO-OPS publishes no predictions for it at all, so prefer a harmonic bin when one is in range.`,
+  description: `Find CO-OPS tide, water-level and current stations and NDBC buoys near a location, by name, or by station ID, returning a unified list with source, data capabilities, coordinates, and — for NDBC — the physical platform class. This is the required first step for resolving a coordinate pair, a station name, or a bare station number to the station IDs the data tools take (query matches station names and IDs, not places, so a town or marina no station is named after needs geocoding to coordinates first): CO-OPS tide and water-level IDs are numeric (e.g. 9447130 for Seattle), CO-OPS current IDs are alphanumeric (e.g. ACT4176), and NDBC station IDs are mostly 5-character alphanumeric codes (e.g. 46041), with some 7-digit numbers. Two axes are reported separately — capabilities and type name the data products a station serves (tide, current, water_level, met, current_profile, water_quality), while platform is the NDBC physical classification (buoy, fixed, oilrig, dart, tao, usv, other) that CO-OPS stations do not carry. Supply latitude and longitude together for a proximity search, or query for a name-or-ID substring matched against both sources, or state for CO-OPS coverage in one state; the filters combine, and results lead with an exact ID match unless a proximity search is ordering them by distance. A search that matches nothing is a success with total_found: 0 carrying an echo of the filters that were applied, and a search whose catalogs did not all answer says which source is missing. CO-OPS prediction stations carry a third axis as well, prediction_class, which says what a station can actually answer: a tide station is either reference, serving both hilo and the 6-minute curve, or subordinate, serving hilo only, while a current station carries its class per depth bin in bins[] — a harmonic or subordinate bin serves the normal flood/ebb/slack series, and a weak_and_variable bin may instead answer noaa_marine_get_currents with a coverage statement and no events, or report that CO-OPS publishes no predictions for it at all, so prefer a harmonic bin when one is in range.`,
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   input: z.object({
@@ -250,13 +251,10 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
       .describe(
         'Filter by data capability or NDBC platform class. Every returned station matches at least one requested value — a capability value against its capabilities list, or buoy against its platform class. Omit to return all stations.',
       ),
-    limit: z
-      .number()
-      .int()
-      .min(1)
-      .max(200)
-      .default(20)
-      .describe('Maximum number of stations to return. Defaults to 20.'),
+    limit: limitSchema('noaa_marine_find_stations', 'Stations to return on this page.'),
+    offset: offsetSchema(
+      'Index of the first match to return, for reading a result larger than one page. 0 (default) starts at the first match; pass the next_offset from a previous call to continue. An offset past the last match returns an empty page rather than an error.',
+    ),
   }),
 
   output: z.object({
@@ -328,18 +326,24 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
           .describe('A single station matching the search criteria.'),
       )
       .describe(
-        'Stations matching the search criteria, sorted by distance (if lat/lon provided) or by exact ID match then name. Empty when nothing matched.',
+        'The page of matching stations starting at offset, sorted by distance (if lat/lon provided) or by exact ID match then name, with ties ordered by source and then station ID so every call orders the matches the same way. Empty when nothing matched or offset is past the last match.',
       ),
     total_found: z
       .number()
       .describe(
-        'Total stations matching the filters before the limit was applied. Zero when nothing matched.',
+        'Total stations matching the filters, across every page. Zero when nothing matched.',
       ),
     truncated: z
       .boolean()
       .optional()
       .describe(
-        'True when total_found exceeds the limit and not all matching stations are returned. Increase limit or narrow filters to see more.',
+        'True when matches remain past this page; next_offset reaches them. Absent on the last page.',
+      ),
+    next_offset: z
+      .number()
+      .optional()
+      .describe(
+        'Offset to pass as offset for the next page. Present only while matches remain past this page.',
       ),
   }),
 
@@ -351,7 +355,7 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
       .string()
       .optional()
       .describe(
-        'Guidance about the result set: why a search matched nothing, which catalog did not answer, or that the list was capped.',
+        'Guidance about the result set: why a search matched nothing, which catalog did not answer, that limit was clamped to its cap, or which matches this page carries and the offset that reaches the rest.',
       ),
     sources: SourceReportSchema.optional().describe(
       'Which station catalogs were attempted, answered, and failed. Present only when a catalog fetch rejected, so a partial result set is never read as a complete one.',
@@ -655,21 +659,49 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
     // Sort: by distance if lat/lon provided, otherwise exact ID matches first, then by name.
     // NDBC mirrors CO-OPS gauges under names that start with the CO-OPS number, so a plain
     // name sort puts the mirror ahead of the station that actually carries the queried ID.
+    // Source then station ID — unique together — make the order total, so it never depends on
+    // catalog row order and offset pages partition the matches even across a catalog refresh.
+    // Distance is compared unrounded: nearby stations often share a 0.1 km `distance_km`.
+    const idRank = (r: StationResult) =>
+      exactIdMatches.has(`${r.source}:${r.station_id}`) ? 0 : 1;
+    const codeUnitOrder = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+    const byIdentity = (a: StationResult, b: StationResult) =>
+      codeUnitOrder(a.source, b.source) || codeUnitOrder(a.station_id, b.station_id);
     if (center) {
-      results.sort((a, b) => (a.distance_km ?? 9999) - (b.distance_km ?? 9999));
+      const km = (r: StationResult) => haversineKm(center.lat, center.lon, r.latitude, r.longitude);
+      results.sort((a, b) => km(a) - km(b) || byIdentity(a, b));
     } else {
-      const idRank = (r: StationResult) =>
-        exactIdMatches.has(`${r.source}:${r.station_id}`) ? 0 : 1;
-      results.sort((a, b) => idRank(a) - idRank(b) || a.name.localeCompare(b.name));
+      results.sort(
+        (a, b) => idRank(a) - idRank(b) || a.name.localeCompare(b.name) || byIdentity(a, b),
+      );
     }
 
     const total_found = results.length;
-    const stations = results.slice(0, input.limit);
-    const truncated = stations.length < total_found;
+    const limit = clampLimit('noaa_marine_find_stations', input.limit, ctx);
+    const stations = results.slice(input.offset, input.offset + limit.applied);
+    const pageEnd = input.offset + stations.length;
+    const next_offset = pageEnd < total_found ? pageEnd : undefined;
 
     // One notice reaches the caller, so every source of guidance composes into it —
     // ctx.enrich.notice() writes `notice` last-wins and would otherwise erase the rest.
     const notices: string[] = [];
+    if (limit.notice) notices.push(limit.notice);
+
+    // The page is on output as `next_offset` and `truncated`, beside `stations.length` and
+    // `total_found`; the notice carries the guidance for reaching the rest.
+    if (next_offset !== undefined) {
+      const span =
+        stations.length === 1
+          ? `match ${input.offset + 1}`
+          : `matches ${input.offset + 1}–${pageEnd}`;
+      notices.push(
+        `Showing ${span} of ${total_found} — call again with offset=${next_offset} for the next page, or narrow the filters.`,
+      );
+    } else if (total_found > 0 && stations.length === 0) {
+      notices.push(
+        `Offset ${input.offset} is past the last of ${total_found} matches, so this page is empty. Request a lower offset to read the matches.`,
+      );
+    }
 
     if (failed.length > 0) {
       const report: SourceReport = { answered, attempted, failed };
@@ -701,17 +733,11 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
       notices.push(describeEmptySearch(applied));
     }
 
-    // The cap itself is on output as `truncated`, beside `stations.length` and `total_found`;
-    // the notice carries the guidance for reaching the rest.
-    if (truncated) {
-      notices.unshift(
-        `Showing ${stations.length} of ${total_found} matches — raise limit (max 200) or narrow the filters to reach the rest.`,
-      );
-    }
     if (notices.length > 0) ctx.enrich.notice(notices.join(' '));
 
     ctx.log.info('Station search complete', {
       total_found,
+      offset: input.offset,
       returned: stations.length,
       source: input.source,
       failed_sources: failed,
@@ -720,15 +746,23 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
     return {
       stations,
       total_found,
-      ...(truncated ? { truncated: true } : {}),
+      ...(next_offset !== undefined ? { truncated: true, next_offset } : {}),
     };
   },
 
   format: (result) => {
-    const header = result.truncated
-      ? `**${result.total_found} station(s) found** (showing ${result.stations.length} — results truncated, increase limit or narrow filters)\n`
-      : `**${result.total_found} station(s) found** (showing ${result.stations.length})\n`;
-    const lines: string[] = [header];
+    // The page's first index is implied: next_offset sits one past a page that leaves matches
+    // behind, and a page reaching the end stops at total_found.
+    const shown = result.stations.length;
+    const start = (result.next_offset ?? result.total_found) - shown;
+    const range = `${start + 1}–${start + shown}`;
+    const showing =
+      result.next_offset !== undefined
+        ? `showing ${range} — truncated, more at offset=${result.next_offset}`
+        : shown > 0 && start > 0
+          ? `showing ${range}, the last page`
+          : `showing ${shown}`;
+    const lines: string[] = [`**${result.total_found} station(s) found** (${showing})\n`];
     for (const s of result.stations) {
       const dist = s.distance_km !== undefined ? ` · ${s.distance_km} km` : '';
       const state = s.state

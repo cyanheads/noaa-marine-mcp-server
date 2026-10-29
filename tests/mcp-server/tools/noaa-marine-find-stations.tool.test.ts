@@ -3,6 +3,7 @@
  * @module tests/mcp-server/tools/noaa-marine-find-stations.tool.test
  */
 
+import { z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import {
   createFetchMock,
@@ -849,17 +850,18 @@ describe('noaaMarineFindStations', () => {
     expect(structured.total_found).toBe(2);
     // Both notices survive in one composed string — ctx.enrich.notice() writes `notice`
     // last-wins, so an uncomposed second source would silently erase the first.
-    expect(structured.notice).toMatch(/^Showing 1 of 2 matches/);
+    expect(structured.next_offset).toBe(1);
+    expect(structured.notice).toMatch(/^Showing match 1 of 2 — call again with offset=1/);
     expect(structured.notice).toContain('coops');
     expect(structured.sources).toMatchObject({ answered: ['ndbc'], failed: ['coops'] });
-    // The cap is disclosed by `truncated`, `stations.length`, `total_found` and the notice —
-    // no undeclared shown/cap/ceiling keys, and no stray trailer line for `truncated`.
+    // The page is disclosed by `truncated`, `next_offset`, `stations.length`, `total_found` and
+    // the notice — no undeclared shown/cap/ceiling keys, and no stray trailer line for `truncated`.
     expect(structured).not.toHaveProperty('shown');
     expect(structured).not.toHaveProperty('cap');
     expect(structured).not.toHaveProperty('truncationCeiling');
     const text = result.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
-    expect(text).toContain('(showing 1 — results truncated, increase limit or narrow filters)');
-    expect(text).toContain('Showing 1 of 2 matches');
+    expect(text).toContain('(showing 1–1 — truncated, more at offset=1)');
+    expect(text).toContain('Showing match 1 of 2');
     expect(text).not.toContain('**truncated:**');
   });
 
@@ -872,7 +874,7 @@ describe('noaaMarineFindStations', () => {
     expect(structured.truncated).toBe(true);
     expect(structured.stations).toHaveLength(2);
     expect(structured.notice).toBe(
-      'Showing 2 of 3 matches — raise limit (max 200) or narrow the filters to reach the rest.',
+      'Showing matches 1–2 of 3 — call again with offset=2 for the next page, or narrow the filters.',
     );
     expect(structured).not.toHaveProperty('sources');
     expect(structured).not.toHaveProperty('applied_search');
@@ -891,13 +893,259 @@ describe('noaaMarineFindStations', () => {
     expect(structured).not.toHaveProperty('notice');
   });
 
-  it('declares only applied_search, notice, and sources as enrichment, with truncated on output', () => {
+  it('declares only applied_search, notice, and sources as enrichment, with the page fields on output', () => {
     expect(Object.keys(noaaMarineFindStations.enrichment ?? {}).sort()).toEqual([
       'applied_search',
       'notice',
       'sources',
     ]);
-    expect(Object.keys(noaaMarineFindStations.output.shape)).toContain('truncated');
+    expect(Object.keys(noaaMarineFindStations.output.shape)).toEqual(
+      expect.arrayContaining(['truncated', 'next_offset']),
+    );
+  });
+
+  // --- #49: one clamped cap on limit, offset paging, and a total order the pages partition ---
+
+  /**
+   * Five stations around 47.6, -122.4 whose rounded distances tie at 5.0 km for four of them:
+   * NEAR1 sits 4.99 km out, TIE_A/TIE_B (CO-OPS) and TIEN1 (NDBC) share one point 5.004 km
+   * out, and FAR1 is 11.1 km out. The catalog lists them out of order, so only the sort keys
+   * (unrounded distance, source, station ID) can put them in one order.
+   */
+  const TIE_CENTER = { latitude: 47.6, longitude: -122.4 };
+  const tieCoops = (id: string, lat: number) => ({
+    id,
+    name: `Tie station ${id}`,
+    lat,
+    lng: -122.4,
+    state: 'WA',
+    type: 'R',
+  });
+  const TIE_COOPS_CATALOG = [
+    tieCoops('TIE_B', 47.645),
+    tieCoops('FAR1', 47.7),
+    tieCoops('TIE_A', 47.645),
+    tieCoops('NEAR1', 47.6449),
+  ];
+  const TIE_NDBC = { ...NDBC_BUOY, id: 'TIEN1', name: 'Tie buoy', lat: 47.645, lon: -122.4 };
+  const TIE_ORDER = ['NEAR1', 'TIE_A', 'TIE_B', 'TIEN1', 'FAR1'];
+
+  /** `count` CO-OPS tide stations named and numbered so name order equals ID order. */
+  const manyCoops = (count: number) =>
+    Array.from({ length: count }, (_, i) => {
+      const n = String(i).padStart(4, '0');
+      return { id: `MANY${n}`, name: `Station ${n}`, lat: 30, lng: -80, state: 'FL', type: 'R' };
+    });
+
+  const textOf = (result: { content: unknown[] }) =>
+    result.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
+
+  it('orders a rounded-distance tie group by unrounded distance, then source, then station ID', async () => {
+    const ctx = createMockContext({ errors: noaaMarineFindStations.errors });
+    await mockCatalog({ tidepredictions: TIE_COOPS_CATALOG }, [TIE_NDBC]);
+    const result = await noaaMarineFindStations.handler(
+      noaaMarineFindStations.input.parse({ ...TIE_CENTER, radius_km: 20 }),
+      ctx,
+    );
+
+    expect(result.stations.map((s) => s.station_id)).toEqual(TIE_ORDER);
+    // Four of the five share the rounded figure the old sort compared.
+    expect(result.stations.map((s) => s.distance_km)).toEqual([5, 5, 5, 5, 11.1]);
+  });
+
+  it('gives the same order whatever order the catalogs list the stations in', async () => {
+    const ctx = createMockContext({ errors: noaaMarineFindStations.errors });
+    const input = noaaMarineFindStations.input.parse({ ...TIE_CENTER, radius_km: 20 });
+
+    await mockCatalog({ tidepredictions: TIE_COOPS_CATALOG }, [TIE_NDBC]);
+    const listed = await noaaMarineFindStations.handler(input, ctx);
+    await mockCatalog({ tidepredictions: [...TIE_COOPS_CATALOG].reverse() }, [TIE_NDBC]);
+    const reversed = await noaaMarineFindStations.handler(input, ctx);
+
+    expect(reversed.stations.map((s) => s.station_id)).toEqual(
+      listed.stations.map((s) => s.station_id),
+    );
+  });
+
+  it('breaks a name tie by source, then station ID, without a proximity center', async () => {
+    const ctx = createMockContext({ errors: noaaMarineFindStations.errors });
+    const backRiver = (id: string) => ({
+      id,
+      name: 'Back River entrance',
+      lat: 37,
+      lng: -76,
+      type: 'H',
+    });
+    await mockCatalog({ currentpredictions: [backRiver('ACT7811'), backRiver('ACT6856')] }, [
+      { ...NDBC_BUOY, id: 'BRVA1', name: 'Back River entrance' },
+    ]);
+
+    const result = await noaaMarineFindStations.handler(
+      noaaMarineFindStations.input.parse({ query: 'back river' }),
+      ctx,
+    );
+
+    expect(result.stations.map((s) => `${s.source}:${s.station_id}`)).toEqual([
+      'coops:ACT6856',
+      'coops:ACT7811',
+      'ndbc:BRVA1',
+    ]);
+  });
+
+  it('walks offset across a distance tie group and returns every match exactly once', async () => {
+    const pages: string[][] = [];
+    const nextOffsets: (number | undefined)[] = [];
+    for (const [i, offset] of [0, 2, 4].entries()) {
+      // A catalog refresh between pages reorders the rows; the walk must not notice.
+      const catalog = i % 2 === 0 ? TIE_COOPS_CATALOG : [...TIE_COOPS_CATALOG].reverse();
+      await mockCatalog({ tidepredictions: catalog }, [TIE_NDBC]);
+      const result = await runToolContract(noaaMarineFindStations, {
+        ...TIE_CENTER,
+        radius_km: 20,
+        limit: 2,
+        offset,
+      });
+      const structured = result.structuredContent as {
+        next_offset?: number;
+        stations: { station_id: string }[];
+        total_found: number;
+      };
+      expect(structured.total_found).toBe(5);
+      pages.push(structured.stations.map((s) => s.station_id));
+      nextOffsets.push(structured.next_offset);
+    }
+
+    expect(pages).toEqual([['NEAR1', 'TIE_A'], ['TIE_B', 'TIEN1'], ['FAR1']]);
+    expect(pages.flat()).toEqual(TIE_ORDER);
+    expect(nextOffsets).toEqual([2, 4, undefined]);
+
+    // One call at the cap returns the same identities in the same order.
+    await mockCatalog({ tidepredictions: TIE_COOPS_CATALOG }, [TIE_NDBC]);
+    const whole = await runToolContract(noaaMarineFindStations, {
+      ...TIE_CENTER,
+      radius_km: 20,
+      limit: 200,
+    });
+    const wholeIds = (whole.structuredContent as { stations: { station_id: string }[] }).stations;
+    expect(wholeIds.map((s) => s.station_id)).toEqual(pages.flat());
+  });
+
+  it('clamps limit 201 to the cap of 200 and says so on both surfaces', async () => {
+    await mockCatalog({ tidepredictions: manyCoops(250) });
+
+    const result = await runToolContract(noaaMarineFindStations, { source: 'coops', limit: 201 });
+    const structured = result.structuredContent as Record<string, unknown> & {
+      stations: { station_id: string }[];
+    };
+
+    expect(result.isError).toBeFalsy();
+    expect(structured.stations).toHaveLength(200);
+    expect(structured.stations.at(-1)!.station_id).toBe('MANY0199');
+    expect(structured.total_found).toBe(250);
+    expect(structured.truncated).toBe(true);
+    expect(structured.next_offset).toBe(200);
+    expect(structured.notice).toBe(
+      'Requested limit 201; applied limit 200, the per-call cap. Showing matches 1–200 of 250 — call again with offset=200 for the next page, or narrow the filters.',
+    );
+    const text = textOf(result);
+    expect(text).toContain('Requested limit 201; applied limit 200, the per-call cap.');
+    expect(text).toContain(
+      '**250 station(s) found** (showing 1–200 — truncated, more at offset=200)',
+    );
+  });
+
+  it('passes a limit at the cap through without a clamp notice', async () => {
+    await mockCatalog({ tidepredictions: manyCoops(250) });
+
+    const result = await runToolContract(noaaMarineFindStations, { source: 'coops', limit: 200 });
+    const structured = result.structuredContent as Record<string, unknown> & {
+      stations: unknown[];
+    };
+
+    expect(structured.stations).toHaveLength(200);
+    expect(structured.notice).toBe(
+      'Showing matches 1–200 of 250 — call again with offset=200 for the next page, or narrow the filters.',
+    );
+  });
+
+  it('returns the default 20 when limit is omitted', async () => {
+    await mockCatalog({ tidepredictions: manyCoops(25) });
+
+    const result = await runToolContract(noaaMarineFindStations, { source: 'coops' });
+    const structured = result.structuredContent as { next_offset?: number; stations: unknown[] };
+
+    expect(structured.stations).toHaveLength(20);
+    expect(structured.next_offset).toBe(20);
+  });
+
+  it('marks the final page of a walk with its range and no next_offset or notice', async () => {
+    await mockCatalog({ tidepredictions: manyCoops(25) });
+
+    const result = await runToolContract(noaaMarineFindStations, {
+      source: 'coops',
+      limit: 20,
+      offset: 20,
+    });
+    const structured = result.structuredContent as Record<string, unknown> & {
+      stations: { station_id: string }[];
+    };
+
+    expect(structured.stations.map((s) => s.station_id)).toEqual([
+      'MANY0020',
+      'MANY0021',
+      'MANY0022',
+      'MANY0023',
+      'MANY0024',
+    ]);
+    expect(structured.total_found).toBe(25);
+    expect(structured).not.toHaveProperty('next_offset');
+    expect(structured).not.toHaveProperty('truncated');
+    expect(structured).not.toHaveProperty('notice');
+    expect(textOf(result)).toContain('**25 station(s) found** (showing 21–25, the last page)');
+  });
+
+  it('returns an empty page with a notice for an offset past the last match', async () => {
+    await mockCatalog({ tidepredictions: manyCoops(25) });
+
+    const result = await runToolContract(noaaMarineFindStations, { source: 'coops', offset: 25 });
+    const structured = result.structuredContent as Record<string, unknown>;
+
+    expect(result.isError).toBeFalsy();
+    expect(structured.stations).toEqual([]);
+    expect(structured.total_found).toBe(25);
+    expect(structured).not.toHaveProperty('next_offset');
+    expect(structured).not.toHaveProperty('truncated');
+    expect(structured).not.toHaveProperty('applied_search');
+    expect(structured.notice).toBe(
+      'Offset 25 is past the last of 25 matches, so this page is empty. Request a lower offset to read the matches.',
+    );
+    const text = textOf(result);
+    expect(text).toContain('**25 station(s) found** (showing 0)');
+    expect(text).toContain('Offset 25 is past the last of 25 matches');
+  });
+
+  it('parses a page carrying next_offset through the output schema', () => {
+    expect(
+      noaaMarineFindStations.output.parse({
+        stations: [],
+        total_found: 3,
+        truncated: true,
+        next_offset: 2,
+      }),
+    ).toMatchObject({ next_offset: 2 });
+  });
+
+  it('advertises limit with its default and no maximum, and offset from 0', () => {
+    const schema = z.toJSONSchema(noaaMarineFindStations.input, { io: 'input' }) as {
+      properties: Record<string, Record<string, unknown>>;
+    };
+    expect(schema.properties.limit).toMatchObject({ default: 20, minimum: 1, multipleOf: 1 });
+    expect(schema.properties.limit).not.toHaveProperty('maximum');
+    expect(schema.properties.limit!.description).toContain(
+      'Default 20; a larger value returns at most 200 and says so.',
+    );
+    expect(schema.properties.offset).toMatchObject({ default: 0, minimum: 0, multipleOf: 1 });
+    expect(schema.properties.offset).not.toHaveProperty('maximum');
   });
 
   // --- #21: a rejected fan-out leg is visible, and never reads as an empty search ---
@@ -1413,5 +1661,26 @@ describe('noaaMarineFindStations state resolution through the CO-OPS service', (
     const refreshed = resolve.mock.results[3]!.value;
     expect(refreshed).not.toBe(first);
     expect(refreshed).toEqual(first);
+  });
+});
+
+// Last in the file: it resets the module registry to re-read NOAA_CLAMP_LIMITS, which would
+// split the statically imported service singletons from any later test's dynamic imports.
+describe('noaaMarineFindStations under NOAA_CLAMP_LIMITS=false', () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  it('rejects limit 201 and advertises maximum 200', async () => {
+    vi.resetModules();
+    vi.stubEnv('NOAA_CLAMP_LIMITS', 'false');
+    const { noaaMarineFindStations: strict } = await import(
+      '@/mcp-server/tools/definitions/noaa-marine-find-stations.tool.js'
+    );
+
+    expect(strict.input.safeParse({ limit: 201 }).success).toBe(false);
+    expect(strict.input.parse({ limit: 200 }).limit).toBe(200);
+    const schema = z.toJSONSchema(strict.input, { io: 'input' }) as {
+      properties: Record<string, Record<string, unknown>>;
+    };
+    expect(schema.properties.limit).toMatchObject({ maximum: 200, default: 20 });
   });
 });

@@ -1,10 +1,16 @@
 /**
- * @fileoverview Tests for the shared CO-OPS date-range validator and verification-lag window rule.
+ * @fileoverview Tests for the shared CO-OPS date-range validator, the verification-lag window
+ * rule, and the rule for a window that starts after the station's current date.
  * @module tests/services/coops/date-range.test
  */
 
 import { describe, expect, it, vi } from 'vitest';
-import { awaitsVerification, validateCoopsDateRange } from '@/services/coops/date-range.js';
+import {
+  awaitsVerification,
+  beginsAfterStationDate,
+  type StationClock,
+  validateCoopsDateRange,
+} from '@/services/coops/date-range.js';
 
 describe('validateCoopsDateRange', () => {
   it('accepts a valid same-day range with span 0', () => {
@@ -142,5 +148,134 @@ describe('awaitsVerification', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('beginsAfterStationDate', () => {
+  const day = (iso: string) => new Date(`${iso}T00:00:00Z`);
+  const at = (iso: string) => new Date(iso);
+
+  /** Kwajalein (1820000): UTC+12, no daylight time. */
+  const KWAJALEIN: StationClock = { utcOffsetHours: 12, observesDst: false };
+  /** USCG Station Hatteras (8654467): UTC−5, keeps daylight time. */
+  const HATTERAS: StationClock = { utcOffsetHours: -5, observesDst: true };
+
+  /** A station-clock source that counts its reads. */
+  function clockOf(clock: StationClock | undefined) {
+    return vi.fn(async () => clock);
+  }
+
+  describe('gmt', () => {
+    it('refuses a begin_date after the UTC date and keeps one on it, at both ends of the day', async () => {
+      for (const now of [at('2026-10-29T00:00:00Z'), at('2026-10-29T23:59:59Z')]) {
+        const clock = clockOf(KWAJALEIN);
+        expect(await beginsAfterStationDate(day('2026-10-30'), 'gmt', clock, now)).toBe(true);
+        expect(await beginsAfterStationDate(day('2026-10-29'), 'gmt', clock, now)).toBe(false);
+        // The UTC date is exact; no station is consulted.
+        expect(clock).not.toHaveBeenCalled();
+      }
+    });
+
+    it('refuses the day after at Kwajalein, whose local date is already there', async () => {
+      // Under gmt CO-OPS reads the dates as UTC, and it has no rows for a UTC date not yet begun.
+      const now = at('2026-10-29T15:59:00Z');
+      expect(await beginsAfterStationDate(day('2026-10-30'), 'gmt', clockOf(KWAJALEIN), now)).toBe(
+        true,
+      );
+    });
+  });
+
+  describe('lst and lst_ldt', () => {
+    it('keeps the window at Kwajalein on its local date while that date is ahead of UTC', async () => {
+      // 15:59 UTC on Oct 29 is 03:59 on Oct 30 at UTC+12, where CO-OPS returned rows live.
+      const now = at('2026-10-29T15:59:00Z');
+      const clock = clockOf(KWAJALEIN);
+      expect(await beginsAfterStationDate(day('2026-10-30'), 'lst_ldt', clock, now)).toBe(false);
+      expect(clock).toHaveBeenCalledTimes(1);
+    });
+
+    it('refuses the Kwajalein local date one minute before local midnight and keeps it at midnight', async () => {
+      const before = at('2026-10-29T11:59:00Z'); // 23:59 Oct 29 local
+      const midnight = at('2026-10-29T12:00:00Z'); // 00:00 Oct 30 local
+      expect(
+        await beginsAfterStationDate(day('2026-10-30'), 'lst', clockOf(KWAJALEIN), before),
+      ).toBe(true);
+      expect(
+        await beginsAfterStationDate(day('2026-10-30'), 'lst', clockOf(KWAJALEIN), midnight),
+      ).toBe(false);
+    });
+
+    it('refuses tomorrow at Hatteras, whose local date trails UTC', async () => {
+      const now = at('2026-10-29T16:00:00Z'); // 12:00 EDT
+      expect(
+        await beginsAfterStationDate(day('2026-10-30'), 'lst_ldt', clockOf(HATTERAS), now),
+      ).toBe(true);
+      expect(
+        await beginsAfterStationDate(day('2026-10-29'), 'lst_ldt', clockOf(HATTERAS), now),
+      ).toBe(false);
+    });
+
+    it('adds the daylight hour under lst_ldt only, so the local date can only be read later', async () => {
+      // 04:00 UTC: 00:00 Oct 30 at UTC−4 (lst_ldt with DST), 23:00 Oct 29 at UTC−5 (lst).
+      const midnightDst = at('2026-10-30T04:00:00Z');
+      const minuteBefore = at('2026-10-30T03:59:00Z');
+      const midnightLst = at('2026-10-30T05:00:00Z');
+      const oct30 = day('2026-10-30');
+      expect(await beginsAfterStationDate(oct30, 'lst_ldt', clockOf(HATTERAS), midnightDst)).toBe(
+        false,
+      );
+      expect(await beginsAfterStationDate(oct30, 'lst_ldt', clockOf(HATTERAS), minuteBefore)).toBe(
+        true,
+      );
+      expect(await beginsAfterStationDate(oct30, 'lst', clockOf(HATTERAS), midnightDst)).toBe(true);
+      expect(await beginsAfterStationDate(oct30, 'lst', clockOf(HATTERAS), midnightLst)).toBe(
+        false,
+      );
+    });
+
+    it('never refuses a begin_date on or before the date at UTC−12, and reads no clock for it', async () => {
+      // 12:00 UTC on Oct 29 is 00:00 Oct 29 at UTC−12 — every station has reached Oct 29.
+      const clock = clockOf(KWAJALEIN);
+      const now = at('2026-10-29T12:00:00Z');
+      expect(await beginsAfterStationDate(day('2026-10-29'), 'lst_ldt', clock, now)).toBe(false);
+      expect(await beginsAfterStationDate(day('1996-01-01'), 'lst', clock, now)).toBe(false);
+      expect(clock).not.toHaveBeenCalled();
+    });
+
+    it('reads the clock for a begin_date one past the date at UTC−12', async () => {
+      // 11:59 UTC on Oct 29 is 23:59 Oct 28 at UTC−12, so Oct 29 is in the band.
+      const clock = clockOf(HATTERAS);
+      const now = at('2026-10-29T11:59:00Z');
+      expect(await beginsAfterStationDate(day('2026-10-29'), 'lst_ldt', clock, now)).toBe(false);
+      expect(clock).toHaveBeenCalledTimes(1);
+    });
+
+    it('refuses a begin_date past the date at UTC+14 without reading a clock', async () => {
+      // 09:59 UTC on Oct 29 is 23:59 Oct 29 at UTC+14 — no station has reached Oct 30.
+      const clock = clockOf(undefined);
+      const now = at('2026-10-29T09:59:00Z');
+      expect(await beginsAfterStationDate(day('2026-10-30'), 'lst_ldt', clock, now)).toBe(true);
+      expect(clock).not.toHaveBeenCalled();
+    });
+
+    it('keeps a band window when the station clock is unavailable, the UTC+14 bound', async () => {
+      // 10:00 UTC on Oct 29 is 00:00 Oct 30 at UTC+14, so Oct 30 has begun somewhere.
+      const clock = clockOf(undefined);
+      const now = at('2026-10-29T10:00:00Z');
+      expect(await beginsAfterStationDate(day('2026-10-30'), 'lst_ldt', clock, now)).toBe(false);
+      expect(clock).toHaveBeenCalledTimes(1);
+    });
+
+    it('reads the system clock when no now is given', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(at('2026-10-29T15:59:00Z'));
+      try {
+        const oct30 = day('2026-10-30');
+        expect(await beginsAfterStationDate(oct30, 'lst', clockOf(KWAJALEIN))).toBe(false);
+        expect(await beginsAfterStationDate(oct30, 'gmt', clockOf(KWAJALEIN))).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 });

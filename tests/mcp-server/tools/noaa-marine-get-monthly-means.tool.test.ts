@@ -4,6 +4,7 @@
  * @module tests/mcp-server/tools/noaa-marine-get-monthly-means.tool.test
  */
 
+import { z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -93,6 +94,48 @@ function coopsError(message: string, status = 200): CoopsResponder {
   return () => new Response(JSON.stringify({ error: { message } }), { status });
 }
 
+/** Live catalog rows, trimmed to the fields a datum rejection's lookup reads. */
+const SEATTLE_GAUGE = {
+  id: '9447130',
+  name: 'Seattle',
+  lat: 47.60264,
+  lng: -122.3393,
+  greatlakes: false,
+};
+const CALUMET_GAUGE = {
+  id: '9087044',
+  name: 'Calumet Harbor',
+  lat: 41.72972,
+  lng: -87.53833,
+  greatlakes: true,
+};
+/** Port Allen: a retired gauge (1988–1997), in `historicwl` but not `waterlevels`. */
+const PORT_ALLEN_GAUGE = {
+  id: '1611347',
+  name: 'PORT ALLEN, HANAPEPE BAY, KAUAI ISLAND',
+  lat: 21.9033,
+  lng: -159.592,
+  greatlakes: false,
+};
+/** Waimea Bay: a subordinate tide-prediction station that has never had a gauge. */
+const WAIMEA_TIDE = { id: '1611401', name: 'Waimea Bay', lat: 21.9567, lng: -159.673, type: 'S' };
+
+/** The catalog answered per type from `catalogs`; every data request goes to `data`. */
+function withCatalogs(
+  data: CoopsResponder,
+  catalogs: Record<string, readonly Record<string, unknown>[]>,
+): CoopsResponder {
+  return (endpoint, url) => {
+    if (endpoint !== 'catalog') return data(endpoint, url);
+    const list = catalogs[url.searchParams.get('type') ?? ''];
+    if (!list) throw new Error(`Unexpected catalog read: ${url}`);
+    return Response.json({ stations: list });
+  };
+}
+
+/** The retry clause of a datum hint — where a rejected datum must never reappear. */
+const retryClause = (hint: string) => hint.slice(hint.indexOf('Retry with'));
+
 const errorOf = (r: Result) => (r.structuredContent as { error: ErrorEnvelope }).error;
 const textOf = (r: Result) => r.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
 const hintOf = (r: Result) =>
@@ -155,7 +198,7 @@ describe('noaa_marine_get_monthly_means', () => {
       expect(text).toContain('**Months** (12 records)');
       expect(text).toContain('2025-12:');
       expect(text).not.toContain('2026-01');
-      // A range that fits comes back whole, with no paging disclosure.
+      // A range of at most limit months comes back whole, with no paging disclosure.
       expect(structured).not.toHaveProperty('truncated');
       expect(structured).not.toHaveProperty('notice');
 
@@ -331,24 +374,45 @@ describe('noaa_marine_get_monthly_means', () => {
     const FIFTY_ONE_YEARS = coastalSeries(1975, 1, 613);
     const RANGE = { station_id: '9447130', begin_date: '19750101', end_date: '20251231' };
 
-    it('returns the leading page with rows_matched and next_offset, on both surfaces', async () => {
+    it('describes paging by count, with no response-size budget anywhere on the surface', () => {
+      const surface = JSON.stringify([
+        noaaMarineGetMonthlyMeans.description,
+        z.toJSONSchema(noaaMarineGetMonthlyMeans.input, { io: 'input' }),
+        z.toJSONSchema(noaaMarineGetMonthlyMeans.output),
+        z.toJSONSchema(z.object(noaaMarineGetMonthlyMeans.enrichment ?? {})),
+      ]);
+
+      expect(surface).not.toMatch(/budget|response size|fits? one response|largest page|byte/i);
+    });
+
+    it('returns the default 24 months with rows_matched and next_offset, on both surfaces', async () => {
       fake(monthlyCoops(FIFTY_ONE_YEARS));
       const result = await runToolContract(noaaMarineGetMonthlyMeans, RANGE);
       const structured = result.structuredContent as Structured;
 
       expect(result.isError).toBeFalsy();
       expect(structured.rows_matched).toBe(612);
-      expect(structured.months.length).toBeLessThan(612);
-      expect(structured.rows_returned).toBe(structured.months.length);
+      expect(structured.months.map((m) => `${m.year}-${m.month}`)).toEqual(
+        Array.from({ length: 24 }, (_, i) => `${1975 + Math.floor(i / 12)}-${(i % 12) + 1}`),
+      );
+      expect(structured.rows_returned).toBe(24);
       expect(structured.page_offset).toBe(0);
-      expect(structured.next_offset).toBe(structured.rows_returned);
+      expect(structured.next_offset).toBe(24);
       expect(structured.truncated).toBe(true);
-      expect(JSON.stringify(structured.months).length).toBeLessThanOrEqual(24_000);
 
       const text = textOf(result);
       expect(text).toContain('612');
-      expect(text).toContain(`offset=${structured.next_offset}`);
-      expect(String(structured.notice)).toContain('months 1–');
+      expect(text).toContain('offset=24');
+      expect(String(structured.notice)).toContain('months 1–24 of 612');
+
+      // tools/list advertises the default and no ceiling on either count input.
+      const schema = z.toJSONSchema(noaaMarineGetMonthlyMeans.input, { io: 'input' }) as {
+        properties: Record<string, Record<string, unknown>>;
+      };
+      expect(schema.properties.limit).toMatchObject({ default: 24, minimum: 1 });
+      expect(schema.properties.limit).not.toHaveProperty('maximum');
+      expect(schema.properties.offset).toMatchObject({ default: 0, minimum: 0 });
+      expect(schema.properties.offset).not.toHaveProperty('maximum');
     });
 
     it('walks every page to the end and reassembles the 612 months in order', async () => {
@@ -361,12 +425,15 @@ describe('noaa_marine_get_monthly_means', () => {
         const result = await runToolContract(noaaMarineGetMonthlyMeans, { ...RANGE, offset });
         const structured = result.structuredContent as Structured & { next_offset?: number | null };
         seen.push(...structured.months.map((m) => `${m.year}-${m.month}`));
-        offset = structured.next_offset ?? null;
+        // Each page steps the offset by exactly the months it carried, 24 until the last.
+        const next = structured.next_offset ?? null;
+        if (next !== null) expect(next).toBe(offset + 24);
+        offset = next;
         pages += 1;
         expect(pages).toBeLessThan(40);
       }
 
-      expect(pages).toBeGreaterThanOrEqual(3);
+      expect(pages).toBe(26);
       expect(seen).toHaveLength(612);
       expect(seen[0]).toBe('1975-1');
       expect(seen.at(-1)).toBe('2025-12');
@@ -387,17 +454,48 @@ describe('noaa_marine_get_monthly_means', () => {
       expect(textOf(result)).toContain('past the last of 612 months');
     });
 
-    it('lets limit lower the page and never raise it past the byte bound', async () => {
+    it('lets limit lower the page', async () => {
       fake(monthlyCoops(FIFTY_ONE_YEARS));
       const small = await runToolContract(noaaMarineGetMonthlyMeans, { ...RANGE, limit: 3 });
-      const bounded = await runToolContract(noaaMarineGetMonthlyMeans, RANGE);
-      const raised = await runToolContract(noaaMarineGetMonthlyMeans, { ...RANGE, limit: 10_000 });
 
       expect((small.structuredContent as Structured).months).toHaveLength(3);
       expect((small.structuredContent as Structured).next_offset).toBe(3);
-      expect((raised.structuredContent as Structured).months).toHaveLength(
-        (bounded.structuredContent as Structured).months.length,
-      );
+    });
+
+    it('returns a range under the cap whole on limit 1001, and still says it clamped', async () => {
+      fake(monthlyCoops(FIFTY_ONE_YEARS));
+      const result = await runToolContract(noaaMarineGetMonthlyMeans, { ...RANGE, limit: 1001 });
+      const structured = result.structuredContent as Structured;
+
+      expect(structured.months).toHaveLength(612);
+      expect(structured).not.toHaveProperty('next_offset');
+      expect(structured).not.toHaveProperty('rows_matched');
+      const clamp = 'Requested limit 1001; applied limit 1000, the per-call cap.';
+      expect(structured.notice).toBe(clamp);
+      expect(textOf(result)).toContain(clamp);
+    });
+
+    it('clamps limit 1001 to 1,000 months and leads the page notice with it, on both surfaces', async () => {
+      // 1900-01 → 1991-08 is 1,100 months, past the cap.
+      fake(monthlyCoops(coastalSeries(1900, 1, 1100)));
+      const result = await runToolContract(noaaMarineGetMonthlyMeans, {
+        station_id: '9447130',
+        begin_date: '19000101',
+        end_date: '19910831',
+        limit: 1001,
+      });
+      const structured = result.structuredContent as Structured;
+
+      expect(result.isError).toBeFalsy();
+      expect(structured.months).toHaveLength(1000);
+      expect(structured.rows_matched).toBe(1100);
+      expect(structured.next_offset).toBe(1000);
+      const clamp = 'Requested limit 1001; applied limit 1000, the per-call cap.';
+      expect(String(structured.notice).startsWith(`${clamp} `)).toBe(true);
+      expect(String(structured.notice)).toContain('months 1–1000 of 1100');
+      const text = textOf(result);
+      expect(text).toContain(clamp);
+      expect(text).toContain('offset=1000');
     });
   });
 
@@ -526,17 +624,103 @@ describe('noaa_marine_get_monthly_means', () => {
       expect(errorOf(result).message).toContain('0000000');
     });
 
-    it('maps a datum the station does not carry to datum_unavailable', async () => {
-      fake(coopsError('There is no IGLD for the station: 9447130', 400));
+    it('maps a datum the station does not carry to datum_unavailable, naming planes that read it', async () => {
+      const upstream = fake(
+        withCatalogs(coopsError('There is no IGLD for the station: 9447130', 400), {
+          waterlevels: [SEATTLE_GAUGE],
+        }),
+      );
       const result = await runToolContract(noaaMarineGetMonthlyMeans, {
         station_id: '9447130',
         begin_date: '20250101',
         end_date: '20250131',
         datum: 'IGLD',
       });
+      const retry = retryClause(hintOf(result));
 
-      expectFailure(result, JsonRpcErrorCode.InvalidParams, 'datum_unavailable');
+      expect(result.isError).toBe(true);
+      expect(errorOf(result).code).toBe(JsonRpcErrorCode.InvalidParams);
+      expect(errorOf(result).data?.reason).toBe('datum_unavailable');
       expect(errorOf(result).message).toContain('IGLD');
+      expect(retry).toContain('MLLW');
+      expect(retry).toContain('STND');
+      expect(retry).not.toContain('IGLD');
+      expect(textOf(result)).toContain(retry);
+      expect(textOf(result)).toContain('(reason datum_unavailable');
+      expect(callsTo(upstream, 'catalog').map((u) => u.searchParams.get('type'))).toEqual([
+        'waterlevels',
+      ]);
+    });
+
+    it('names the Great Lakes planes, never the rejected one, at a Great Lakes gauge', async () => {
+      fake(
+        withCatalogs(coopsError('There is no MLLW for the station: 9087044', 400), {
+          waterlevels: [CALUMET_GAUGE],
+        }),
+      );
+      const result = await runToolContract(noaaMarineGetMonthlyMeans, {
+        station_id: '9087044',
+        begin_date: '20250101',
+        end_date: '20250131',
+      });
+      const retry = retryClause(hintOf(result));
+
+      expect(errorOf(result).data?.reason).toBe('datum_unavailable');
+      for (const datum of ['STND', 'IGLD', 'LWD']) expect(retry).toContain(datum);
+      expect(retry).not.toContain('MLLW');
+    });
+
+    it('fails no_gauge at a station in neither water-level catalog, on both surfaces', async () => {
+      const upstream = fake(
+        withCatalogs(coopsError('There is no MLLW for the station: 1611401', 400), {
+          waterlevels: [SEATTLE_GAUGE],
+          historicwl: [SEATTLE_GAUGE],
+          tidepredictions: [WAIMEA_TIDE],
+        }),
+      );
+      const result = await runToolContract(noaaMarineGetMonthlyMeans, {
+        station_id: '1611401',
+        begin_date: '20250101',
+        end_date: '20250331',
+      });
+      const hint = hintOf(result);
+
+      expect(result.isError).toBe(true);
+      expect(errorOf(result).code).toBe(JsonRpcErrorCode.NotFound);
+      expect(errorOf(result).data?.reason).toBe('no_gauge');
+      expect(hint).toContain('noaa_marine_find_stations');
+      expect(hint).toContain('latitude 21.9567, longitude -159.673');
+      expect(hint).toContain('noaa_marine_get_tide_predictions');
+      const text = textOf(result);
+      expect(text).toContain('no water-level gauge');
+      expect(text).toContain('noaa_marine_get_tide_predictions');
+      expect(text).toContain('(reason no_gauge');
+      expect(callsTo(upstream, 'catalog').map((u) => u.searchParams.get('type'))).toEqual([
+        'waterlevels',
+        'historicwl',
+        'tidepredictions',
+      ]);
+    });
+
+    it('keeps datum_unavailable at a retired gauge listed only in historicwl', async () => {
+      fake(
+        withCatalogs(
+          coopsError(
+            ' The supported Datum values are: MHHW, MHW, MTL, MSL, MLW, MLLW, LWI, HWI',
+            400,
+          ),
+          { waterlevels: [SEATTLE_GAUGE], historicwl: [PORT_ALLEN_GAUGE] },
+        ),
+      );
+      const result = await runToolContract(noaaMarineGetMonthlyMeans, {
+        station_id: '1611347',
+        begin_date: '19960101',
+        end_date: '19961231',
+        datum: 'NAVD',
+      });
+
+      expect(errorOf(result).data?.reason).toBe('datum_unavailable');
+      expect(hintOf(result)).toContain('NAVD88');
     });
 
     it.each([

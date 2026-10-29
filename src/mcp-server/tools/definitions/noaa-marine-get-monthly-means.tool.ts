@@ -6,14 +6,19 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
-import { getCoopsService, isCoopsBodyError } from '@/services/coops/coops-service.js';
+import { clampLimit, limitSchema, offsetSchema } from '@/mcp-server/tools/limit-clamp.js';
+import {
+  datumRetryHint,
+  getCoopsService,
+  isCoopsBodyError,
+} from '@/services/coops/coops-service.js';
 import {
   awaitsVerification,
   COOPS_DATE_FORM,
   validateCoopsDateRange,
 } from '@/services/coops/date-range.js';
 import { pageDisclosure, pageNotice, pageRows } from '@/services/coops/row-page.js';
-import type { CoopsMonthlyMeanRow } from '@/services/coops/types.js';
+import type { CoopsMonthlyMeanRow, CoopsStation } from '@/services/coops/types.js';
 
 /** The span CO-OPS names as its `monthly_mean` ceiling, enforced before the call. */
 const MAX_SPAN_DAYS = 73_000;
@@ -50,6 +55,18 @@ function monthIndex(year: number, month: number): number {
   return year * 12 + (month - 1);
 }
 
+/**
+ * The recovery for a station CO-OPS recognizes but that has never had a water-level gauge: a
+ * gauge nearby, and the predicted tide at the station itself when it is a tide-prediction
+ * station. The tide-prediction row carries the coordinates the nearby search needs.
+ */
+function noGaugeHint(stationId: string, tideStation: CoopsStation | undefined): string {
+  if (!tideStation) {
+    return `Find a water-level station near it with noaa_marine_find_stations and types=["water_level"].`;
+  }
+  return `Find a water-level station nearby with noaa_marine_find_stations, latitude ${tideStation.lat}, longitude ${tideStation.lng}, and types=["water_level"]. For the predicted tide at station ${stationId}, call noaa_marine_get_tide_predictions with that station_id.`;
+}
+
 const height = (what: string) =>
   z
     .number()
@@ -74,7 +91,7 @@ const lunitidal = (what: string) =>
 
 export const noaaMarineGetMonthlyMeans = tool('noaa_marine_get_monthly_means', {
   title: 'Get Monthly Means',
-  description: `Verified monthly means for a CO-OPS water-level station, one row per station-month: the month's highest and lowest water, its tidal datums (MHHW, MHW, MSL, MTL, MLW, MLLW, DTL), tidal ranges (GT, MN, DHQ, DLQ), and lunitidal intervals (HWI, LWI) — the record a sea-level or tidal-range trend over years to decades is read from. Heights are relative to the requested datum in the requested units. A value CO-OPS publishes no figure for is omitted rather than reported as zero; a Great Lakes station carries only highest, msl, and lowest. A range may span up to 73,000 days, checked before the call, and CO-OPS verifies this product monthly, for the prior month, so a window ending on or after the first day of the prior month can fail with verified_data_lag. A range whose months fit the response budget is returned whole; a longer one returns the leading months, with rows_matched, rows_returned, and next_offset reporting how many matched and which offset reaches the rest. Use noaa_marine_find_stations with types=["water_level"] first to resolve a station name or location to a station ID.`,
+  description: `Verified monthly means for a CO-OPS water-level station, one row per station-month: the month's highest and lowest water, its tidal datums (MHHW, MHW, MSL, MTL, MLW, MLLW, DTL), tidal ranges (GT, MN, DHQ, DLQ), and lunitidal intervals (HWI, LWI) — the record a sea-level or tidal-range trend over years to decades is read from. Heights are relative to the requested datum in the requested units. A value CO-OPS publishes no figure for is omitted rather than reported as zero; a Great Lakes station carries only highest, msl, and lowest. A range may span up to 73,000 days, checked before the call, and CO-OPS verifies this product monthly, for the prior month, so a window ending on or after the first day of the prior month can fail with verified_data_lag. Each call returns up to limit months from offset; a range of at most limit months returns whole, and a longer one reports rows_matched, rows_returned, and next_offset, the offset that reaches the rest — raise limit to read a decades-long record in one call. Use noaa_marine_find_stations with types=["water_level"] first to resolve a station name or location to a station ID.`,
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
@@ -100,7 +117,7 @@ export const noaaMarineGetMonthlyMeans = tool('noaa_marine_get_monthly_means', {
       .enum(['MLLW', 'MHHW', 'MHW', 'MTL', 'MSL', 'MLW', 'NAVD', 'STND', 'IGLD', 'LWD', 'CRD'])
       .default('MLLW')
       .describe(
-        "Datum the monthly heights are referenced to. MLLW (default) is the US nautical chart datum; MHHW, MHW, MTL, MSL, and MLW are the other tidal planes. NAVD is NAVD88 and reads only where the station has an NAVD88 tie. STND is the station's own datum and reads any station. IGLD and LWD apply at Great Lakes stations only, which carry no tidal datum, and CRD at Columbia River stations only. A datum this station does not carry comes back as datum_unavailable.",
+        "Datum the monthly heights are referenced to. MLLW (default) is the US nautical chart datum; MHHW, MHW, MTL, MSL, and MLW are the other tidal planes. NAVD is NAVD88 and reads only where the station has an NAVD88 tie. STND is the station's own datum and reads any station. IGLD and LWD apply at Great Lakes stations only, which carry no tidal datum, and CRD at Columbia River stations only. A datum this station does not carry comes back as datum_unavailable, whose hint names a datum to retry with, and a station with no water-level gauge at all as no_gauge.",
       ),
     units: z
       .enum(['english', 'metric'])
@@ -108,22 +125,10 @@ export const noaaMarineGetMonthlyMeans = tool('noaa_marine_get_monthly_means', {
       .describe(
         'Unit system for the heights: english = feet; metric = meters. The lunitidal intervals are hours either way.',
       ),
-    offset: z
-      .number()
-      .int()
-      .min(0)
-      .default(0)
-      .describe(
-        'Month offset into the matched series, for reading a range whose months do not fit one response. 0 (default) starts at the first month; pass the next_offset from a previous call to continue. An offset past the last month returns an empty page rather than an error.',
-      ),
-    limit: z
-      .number()
-      .int()
-      .min(1)
-      .optional()
-      .describe(
-        'Maximum months to return on this page, for a caller that wants fewer than the response budget allows. Omit for the largest page that fits; a value larger than the budget allows does not widen the page.',
-      ),
+    offset: offsetSchema(
+      'Month offset into the matched series, for reading a range longer than one page. 0 (default) starts at the first month; pass the next_offset from a previous call to continue. An offset past the last month returns an empty page rather than an error.',
+    ),
+    limit: limitSchema('noaa_marine_get_monthly_means', 'Months to return on this page.'),
   }),
 
   output: z.object({
@@ -165,7 +170,7 @@ export const noaaMarineGetMonthlyMeans = tool('noaa_marine_get_monthly_means', {
           .describe('One station-month of tidal datums and extremes.'),
       )
       .describe(
-        'One row per station-month in the requested range, oldest first — the whole matched series when it fits one response, otherwise the leading page starting at offset. rows_matched and next_offset report what a page left behind.',
+        'One row per station-month in the requested range, oldest first — the whole matched series when it holds at most limit months, otherwise the page of up to limit months starting at offset. rows_matched and next_offset report what a page left behind.',
       ),
   }),
 
@@ -173,7 +178,9 @@ export const noaaMarineGetMonthlyMeans = tool('noaa_marine_get_monthly_means', {
     notice: z
       .string()
       .optional()
-      .describe('What this page of the monthly series covers and how to reach the next page.'),
+      .describe(
+        'That limit was clamped to its cap, then what this page of the monthly series covers and how to reach the next page — whichever apply, composed into one string.',
+      ),
     truncated: z
       .boolean()
       .optional()
@@ -237,7 +244,14 @@ export const noaaMarineGetMonthlyMeans = tool('noaa_marine_get_monthly_means', {
       code: JsonRpcErrorCode.InvalidParams,
       when: 'The station does not carry the requested datum — a Great Lakes station has no tidal datum, and IGLD and LWD apply at Great Lakes stations only.',
       recovery:
-        'Retry with a datum this station carries — MLLW or STND at a coastal station, IGLD, LWD, or STND at a Great Lakes station.',
+        'Retry with a datum this station carries — STND reads any water-level gauge, and the runtime hint names a datum to retry with, never the one just rejected.',
+    },
+    {
+      reason: 'no_gauge',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'CO-OPS rejected the datum at a station that is in neither its active nor its historic water-level station list, so the station has never had a water-level gauge and publishes no monthly means at any datum.',
+      recovery:
+        'Find a water-level station near it with noaa_marine_find_stations and types=["water_level"], or call noaa_marine_get_tide_predictions with this station_id when it is a tide-prediction station.',
     },
     {
       reason: 'verified_data_lag',
@@ -294,7 +308,8 @@ export const noaaMarineGetMonthlyMeans = tool('noaa_marine_get_monthly_means', {
             `CO-OPS has no monthly means for station ${input.station_id} in a window ending ${input.end_date}. The window ends before the prior month, so it is not waiting on CO-OPS's monthly verification.`,
           );
 
-    const fetched = await getCoopsService()
+    const svc = getCoopsService();
+    const fetched = await svc
       .fetchMonthlyMeans(
         {
           station: input.station_id,
@@ -305,12 +320,27 @@ export const noaaMarineGetMonthlyMeans = tool('noaa_marine_get_monthly_means', {
         },
         ctx,
       )
-      .catch((err: unknown): never => {
+      .catch(async (err: unknown): Promise<never> => {
         if (isCoopsBodyError(err)) {
+          /*
+           * CO-OPS rejects the datum at a station that has never had a gauge, too. The catalogs
+           * tell the two apart, read on this failure path only; a catalog that cannot be read
+           * leaves the datum retry standing.
+           */
           if (err.coopsReason === 'datum_unavailable') {
+            const gauge = await svc.lookupGauge(input.station_id, ctx);
+            if (gauge.kind === 'no_gauge') {
+              throw ctx.fail(
+                'no_gauge',
+                `Station ${input.station_id} has no water-level gauge, so CO-OPS publishes no monthly means for it at any datum.`,
+                { recovery: { hint: noGaugeHint(input.station_id, gauge.tideStation) } },
+              );
+            }
+            const greatLakes = gauge.kind === 'gauge' && gauge.station.greatlakes === true;
             throw ctx.fail(
               'datum_unavailable',
               `Station ${input.station_id} does not carry datum ${input.datum}.`,
+              { recovery: { hint: datumRetryHint(input.station_id, input.datum, greatLakes) } },
             );
           }
           if (err.coopsReason === 'station_error') {
@@ -362,14 +392,17 @@ export const noaaMarineGetMonthlyMeans = tool('noaa_marine_get_monthly_means', {
 
     if (months.length === 0) throw noMonths();
 
-    const page = pageRows(months, {
-      offset: input.offset,
-      ...(input.limit === undefined ? {} : { limit: input.limit }),
-    });
+    // notice is last-wins, so the clamp and page sentences are composed once, clamp first — a
+    // clamped request whose months all fit under the cap returns whole and still says so.
+    const limit = clampLimit('noaa_marine_get_monthly_means', input.limit, ctx);
+    const page = pageRows(months, { offset: input.offset, limit: limit.applied });
+    const notices: string[] = [];
+    if (limit.notice) notices.push(limit.notice);
     if (!page.whole) {
       ctx.enrich(pageDisclosure(page));
-      ctx.enrich.notice(pageNotice(page, 'months'));
+      notices.push(pageNotice(page, 'months'));
     }
+    if (notices.length > 0) ctx.enrich.notice(notices.join(' '));
 
     ctx.log.info('Monthly means fetched', {
       station_id: input.station_id,

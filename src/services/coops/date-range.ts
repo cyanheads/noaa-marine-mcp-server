@@ -1,7 +1,8 @@
 /**
  * @fileoverview Strict calendar-date range validation shared by the CO-OPS date tools
- *   (tide predictions, water level, monthly means, currents), and the verification-lag window
- *   rule the verified-product tools share.
+ *   (tide predictions, water level, monthly means, currents), the verification-lag window
+ *   rule the verified-product tools share, and the rule for a window that starts after the
+ *   station's current date.
  * @module services/coops/date-range
  *
  * The tools accept each date as `YYYYMMDD` or `YYYY-MM-DD`; CO-OPS takes `YYYYMMDD`. The
@@ -81,6 +82,63 @@ function parseCalendarDate(s: string): { compact: string; date: Date } | null {
 export function awaitsVerification(end: Date, now: Date = new Date()): boolean {
   const priorMonthStart = Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1);
   return end.getTime() >= priorMonthStart;
+}
+
+/** The zones CO-OPS reads a request's dates in: UTC, local standard, local standard/daylight. */
+export type CoopsTimeZone = 'gmt' | 'lst' | 'lst_ldt';
+
+/** A station's clock as its catalog row publishes it. */
+export interface StationClock {
+  /** Whether the station keeps daylight time (`observedst`). */
+  observesDst: boolean;
+  /** Standard-time offset from UTC in hours (`timezonecorr`). */
+  utcOffsetHours: number;
+}
+
+/**
+ * The offsets no station's local date falls outside: CO-OPS gauges run from UTC−11 to UTC+12,
+ * plus a daylight hour, and the bounds keep a margin past both ends.
+ */
+const WESTMOST_OFFSET_HOURS = -12;
+const EASTMOST_OFFSET_HOURS = 14;
+
+const HOUR_MS = 60 * 60 * 1000;
+
+/** The calendar date `offsetHours` from UTC at `now`, as midnight UTC on that date. */
+function dateAtOffset(now: Date, offsetHours: number): number {
+  const shifted = new Date(now.getTime() + offsetHours * HOUR_MS);
+  return Date.UTC(shifted.getUTCFullYear(), shifted.getUTCMonth(), shifted.getUTCDate());
+}
+
+/**
+ * Whether a window beginning on `begin` starts after the station's current date, in the zone
+ * CO-OPS reads the request's dates in — so it cannot hold an observation yet.
+ *
+ * Under `gmt` that is the UTC date, exactly. Under `lst` and `lst_ldt` it is the station's local
+ * date, which runs up to a day either side of UTC, so the station's clock is read only where
+ * stations disagree: a `begin` on or before the date at UTC−12 has arrived everywhere, and one
+ * after the date at UTC+14 has arrived nowhere. Between them the clock is the station's standard
+ * offset, plus an hour under `lst_ldt` where it keeps daylight time — applied year-round, so it
+ * can only place the local date later than it is. A missing clock falls back to the UTC+14 bound,
+ * which inside that band never refuses. The rule therefore never refuses a window that can hold
+ * data; a near-midnight window or an unknown station is left to CO-OPS to answer.
+ *
+ * `now` is injectable so the boundaries are testable.
+ */
+export async function beginsAfterStationDate(
+  begin: Date,
+  timeZone: CoopsTimeZone,
+  stationClock: () => Promise<StationClock | undefined>,
+  now: Date = new Date(),
+): Promise<boolean> {
+  const beginsAfter = (offsetHours: number) => begin.getTime() > dateAtOffset(now, offsetHours);
+  if (timeZone === 'gmt') return beginsAfter(0);
+  if (!beginsAfter(WESTMOST_OFFSET_HOURS)) return false;
+  if (beginsAfter(EASTMOST_OFFSET_HOURS)) return true;
+  const clock = await stationClock();
+  if (!clock) return false;
+  const daylightHours = timeZone === 'lst_ldt' && clock.observesDst ? 1 : 0;
+  return beginsAfter(clock.utcOffsetHours + daylightHours);
 }
 
 /**

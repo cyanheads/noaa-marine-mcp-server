@@ -3,6 +3,7 @@
  * @module tests/mcp-server/tools/noaa-marine-get-tide-predictions.tool.test
  */
 
+import { z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -433,6 +434,56 @@ describe('noaaMarineGetTidePredictions', () => {
       expect(hint).not.toContain('noaa_marine_find_stations');
     });
 
+    /** The datum_unavailable recovery hint for a rejection of `datum` at station 9439040. */
+    async function datumHint(datum: string, message: string): Promise<string> {
+      const ctx = createMockContext({ errors: noaaMarineGetTidePredictions.errors });
+      const { getCoopsService } = await import('@/services/coops/coops-service.js');
+      const svc = getCoopsService();
+      vi.spyOn(svc, 'getStations').mockResolvedValue([] as never);
+      vi.spyOn(svc, 'fetchTidePredictions').mockRejectedValue(
+        new CoopsBodyError('datum_unavailable', message),
+      );
+      const input = noaaMarineGetTidePredictions.input.parse({
+        station_id: '9439040',
+        begin_date: '20260918',
+        end_date: '20260918',
+        datum,
+      });
+      const err = await Promise.resolve(noaaMarineGetTidePredictions.handler(input, ctx)).catch(
+        (e: unknown) => e,
+      );
+      expect(err).toMatchObject({ data: { reason: 'datum_unavailable' } });
+      return (err as { data: { recovery?: { hint?: string } } }).data.recovery?.hint ?? '';
+    }
+
+    it('offers MLLW and STND after a NAVD rejection', async () => {
+      expect(await datumHint('NAVD', AMBIGUOUS)).toBe(
+        "Station 9439040 has no NAVD88 tie. Retry with datum MLLW for chart-referenced heights, or STND for the station's own datum.",
+      );
+    });
+
+    it('offers MLLW and STND after another tidal datum is rejected', async () => {
+      expect(await datumHint('MHHW', AMBIGUOUS)).toBe(
+        "Station 9439040 does not carry datum MHHW. Retry with datum MLLW, the US nautical chart datum, or STND, the station's own datum.",
+      );
+    });
+
+    it('never names MLLW back after CO-OPS rejects MLLW', async () => {
+      expect(
+        await datumHint('MLLW', 'CO-OPS error: There is no MLLW for the station: 9439040'),
+      ).toBe(
+        "Station 9439040 does not carry datum MLLW. Retry with datum STND, the station's own datum.",
+      );
+    });
+
+    it('never names STND back after CO-OPS rejects STND', async () => {
+      expect(
+        await datumHint('STND', 'CO-OPS error: There is no STND for the station: 9439040'),
+      ).toBe(
+        'Station 9439040 does not carry datum STND. Retry with datum MLLW, the US nautical chart datum.',
+      );
+    });
+
     it('keeps no_predictions for the same sentence when MLLW was requested', async () => {
       const ctx = createMockContext({ errors: noaaMarineGetTidePredictions.errors });
 
@@ -485,10 +536,10 @@ describe('noaaMarineGetTidePredictions', () => {
     });
   });
 
-  // --- #18: the page is bounded by serialized payload size, identical on both surfaces ---
+  // --- #18 / #49: the page is limit rows from offset, disclosed identically on both surfaces ---
 
   describe('paging', () => {
-    /** Four hilo events a day at their real width — 31 days fits the budget, a year does not. */
+    /** Four hilo events a day: 12 days is 48, 31 days is 124, a year is 1,460. */
     function hiloDays(days: number, month = '07'): { t: string; type: string; v: string }[] {
       const rows: { t: string; type: string; v: string }[] = [];
       for (let d = 0; d < days; d += 1) {
@@ -528,7 +579,30 @@ describe('noaaMarineGetTidePredictions', () => {
       return svc;
     }
 
-    it('returns a 31-day hilo call byte-identical to the unpaged output, with no disclosure', async () => {
+    const textOf = (result: { content: unknown[] }) =>
+      result.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
+
+    it('returns a range of at most the default 50 rows whole, with no disclosure', async () => {
+      await mockPredictions(hiloDays(12));
+      const result = await runToolContract(noaaMarineGetTidePredictions, {
+        begin_date: '20250701',
+        end_date: '20250712',
+        station_id: '9447130',
+      });
+      const structured = result.structuredContent as Record<string, unknown>;
+
+      expect(structured.predictions).toHaveLength(48);
+      expect(structured).not.toHaveProperty('truncated');
+      expect(structured).not.toHaveProperty('rows_matched');
+      expect(structured).not.toHaveProperty('next_offset');
+      expect(structured).not.toHaveProperty('notice');
+    });
+
+    /*
+     * #18 pinned this 31-day range as returning whole and byte-identical to the unpaged tool.
+     * #49 pages by count at a default of 50, so its 124 events are now three pages.
+     */
+    it('pages a 31-day hilo range at the default of 50 rows', async () => {
       await mockPredictions(hiloDays(31));
       const result = await runToolContract(noaaMarineGetTidePredictions, {
         begin_date: '20250701',
@@ -537,41 +611,21 @@ describe('noaaMarineGetTidePredictions', () => {
       });
       const structured = result.structuredContent as Record<string, unknown>;
 
-      // Captured against the pre-paging tool for this exact fixture: 124 events, 6,763 bytes of
-      // structuredContent and 4,200 bytes of text. Both surfaces must stay on those numbers.
-      expect((structured.predictions as unknown[]).length).toBe(124);
-      expect(JSON.stringify(structured).length).toBe(6763);
-      expect(result.content).toHaveLength(1);
-      expect(result.content.map((b) => (b as { text?: string }).text ?? '').join('').length).toBe(
-        4200,
-      );
-      expect(structured).not.toHaveProperty('truncated');
-      expect(structured).not.toHaveProperty('rows_matched');
-      expect(structured).not.toHaveProperty('next_offset');
-      expect(structured).not.toHaveProperty('notice');
-    });
-
-    it('pages a year of hilo events, which does not fit the budget', async () => {
-      await mockPredictions(hiloDays(365));
-      const result = await runToolContract(noaaMarineGetTidePredictions, {
-        begin_date: '20250101',
-        end_date: '20251231',
-        station_id: '9447130',
+      expect(structured.predictions).toHaveLength(50);
+      expect(structured).toMatchObject({
+        next_offset: 50,
+        page_offset: 0,
+        rows_matched: 124,
+        rows_returned: 50,
+        truncated: true,
       });
-      const structured = result.structuredContent as Record<string, unknown>;
-
-      expect(structured.rows_matched).toBe(1460);
-      expect((structured.predictions as unknown[]).length).toBeLessThan(1460);
-      expect(JSON.stringify(structured.predictions).length).toBeLessThanOrEqual(24_000);
-      expect(structured.truncated).toBe(true);
-      expect(structured.next_offset).toBe(structured.rows_returned);
-
-      const text = result.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
-      expect(text).toContain('1460');
-      expect(text).toContain('offset');
+      const notice =
+        'This page carries predictions 1–50 of 124. Call again with offset=50 for the next page.';
+      expect(structured.notice).toBe(notice);
+      expect(textOf(result)).toContain(notice);
     });
 
-    it('walks a 6-minute curve first page to empty page and reassembles the whole series', async () => {
+    it('walks a 6-minute curve 100 rows at a time and visits every row once', async () => {
       const rows = sixMin(2400);
       await mockPredictions(rows);
       const times: string[] = [];
@@ -583,6 +637,7 @@ describe('noaaMarineGetTidePredictions', () => {
           begin_date: '20250701',
           end_date: '20250710',
           interval: '6min',
+          limit: 100,
           offset,
           station_id: '9447130',
         });
@@ -590,14 +645,91 @@ describe('noaaMarineGetTidePredictions', () => {
           next_offset?: number | null;
           predictions: { time: string }[];
         };
+        expect(structured.predictions).toHaveLength(100);
         times.push(...structured.predictions.map((p) => p.time));
         pages += 1;
+        expect(structured.next_offset).toBe(pages === 24 ? null : offset + 100);
         offset = structured.next_offset ?? null;
-        expect(pages).toBeLessThan(40);
+        expect(pages).toBeLessThanOrEqual(24);
       }
 
-      expect(pages).toBeGreaterThanOrEqual(3);
       expect(times).toEqual(rows.map((r) => r.t));
+    });
+
+    it('clamps limit 1001 to 1,000 rows and leads the page notice with the clamp, on both surfaces', async () => {
+      await mockPredictions(hiloDays(365));
+      const result = await runToolContract(noaaMarineGetTidePredictions, {
+        begin_date: '20250101',
+        end_date: '20251231',
+        limit: 1001,
+        station_id: '9447130',
+      });
+      const structured = result.structuredContent as Record<string, unknown>;
+
+      expect(structured.predictions).toHaveLength(1000);
+      expect(structured).toMatchObject({ next_offset: 1000, rows_matched: 1460 });
+      const notice =
+        'Requested limit 1001; applied limit 1000, the per-call cap. This page carries predictions 1–1000 of 1460. Call again with offset=1000 for the next page.';
+      expect(structured.notice).toBe(notice);
+      expect(textOf(result)).toContain(notice);
+    });
+
+    it('still names the clamp when the clamped page holds the whole range', async () => {
+      await mockPredictions(hiloDays(31));
+      const result = await runToolContract(noaaMarineGetTidePredictions, {
+        begin_date: '20250701',
+        end_date: '20250731',
+        limit: 5000,
+        station_id: '9447130',
+      });
+      const structured = result.structuredContent as Record<string, unknown>;
+
+      expect(structured.predictions).toHaveLength(124);
+      expect(structured).not.toHaveProperty('next_offset');
+      expect(structured.notice).toBe('Requested limit 5000; applied limit 1000, the per-call cap.');
+    });
+
+    it('describes paging by count, with no response-size budget anywhere on the surface', () => {
+      const surface = JSON.stringify([
+        noaaMarineGetTidePredictions.description,
+        z.toJSONSchema(noaaMarineGetTidePredictions.input, { io: 'input' }),
+        z.toJSONSchema(noaaMarineGetTidePredictions.output),
+        z.toJSONSchema(z.object(noaaMarineGetTidePredictions.enrichment ?? {})),
+      ]);
+
+      expect(surface).not.toMatch(/budget|response size|fits? one response|largest page|byte/i);
+    });
+
+    it('advertises limit with its default and no maximum, and offset with no maximum', () => {
+      const schema = z.toJSONSchema(noaaMarineGetTidePredictions.input, { io: 'input' }) as {
+        properties: Record<string, Record<string, unknown>>;
+      };
+      expect(schema.properties.limit).toMatchObject({ default: 50, minimum: 1, multipleOf: 1 });
+      expect(schema.properties.limit).not.toHaveProperty('maximum');
+      expect(schema.properties.limit!.description).toBe(
+        'Prediction rows to return on this page. Default 50; a larger value returns at most 1,000 and says so.',
+      );
+      expect(schema.properties.offset).toMatchObject({ default: 0, minimum: 0, multipleOf: 1 });
+      expect(schema.properties.offset).not.toHaveProperty('maximum');
+    });
+
+    it('pages a year of hilo events at the default of 50 rows', async () => {
+      await mockPredictions(hiloDays(365));
+      const result = await runToolContract(noaaMarineGetTidePredictions, {
+        begin_date: '20250101',
+        end_date: '20251231',
+        station_id: '9447130',
+      });
+      const structured = result.structuredContent as Record<string, unknown>;
+
+      expect(structured.rows_matched).toBe(1460);
+      expect(structured.predictions).toHaveLength(50);
+      expect(structured.truncated).toBe(true);
+      expect(structured.next_offset).toBe(50);
+
+      const text = textOf(result);
+      expect(text).toContain('1460');
+      expect(text).toContain('offset');
     });
 
     it('returns an empty page past the last one rather than an error', async () => {

@@ -26,6 +26,11 @@ export interface CoopsStation {
   lng: number;
   name: string;
   /**
+   * Whether the station keeps daylight time. Published on `waterlevels` and `historicwl` rows;
+   * read with `timezonecorr` to place the station's local date under `lst_ldt`.
+   */
+  observedst?: boolean;
+  /**
    * The reference station a subordinate tide station derives its offsets from.
    * `tidepredictions` rows only, and an empty string on a reference station.
    */
@@ -37,6 +42,11 @@ export interface CoopsStation {
    * `CoopsService.stationStates()`, which resolves it once per catalog refresh.
    */
   state?: string;
+  /**
+   * The station's standard-time offset from UTC in hours, −11 to +12 on the water-level
+   * catalogs. Absent on `currentpredictions` rows.
+   */
+  timezonecorr?: number;
   /**
    * Prediction-class code, decoded by `prediction-class.ts`. `tidepredictions` publishes
    * R and S; `currentpredictions` publishes H, S, and W. `waterlevels` has no `type` field.
@@ -154,5 +164,14 @@ export interface CoopsStationListResponse {
   stations: CoopsStation[];
 }
 
-/** Supported CO-OPS station list types for the metadata endpoint. */
-export type CoopsStationType = 'tidepredictions' | 'currentpredictions' | 'waterlevels';
+/**
+ * Supported CO-OPS station list types for the metadata endpoint. `waterlevels` lists the active
+ * gauges only; `historicwl` lists the stations with a water-level record, retired gauges included
+ * (whose data the API serves for their record years) and all but a few active ones. A station in
+ * neither has never had a water-level gauge.
+ */
+export type CoopsStationType =
+  | 'tidepredictions'
+  | 'currentpredictions'
+  | 'waterlevels'
+  | 'historicwl';

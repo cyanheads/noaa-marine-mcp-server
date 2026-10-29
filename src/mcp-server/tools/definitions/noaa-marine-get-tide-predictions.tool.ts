@@ -6,6 +6,7 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
+import { clampLimit, limitSchema, offsetSchema } from '@/mcp-server/tools/limit-clamp.js';
 import { getCoopsService, isCoopsBodyError } from '@/services/coops/coops-service.js';
 import { COOPS_DATE_FORM, validateCoopsDateRange } from '@/services/coops/date-range.js';
 import { isSubordinateTideStation } from '@/services/coops/prediction-class.js';
@@ -13,7 +14,7 @@ import { pageDisclosure, pageNotice, pageRows } from '@/services/coops/row-page.
 
 export const noaaMarineGetTidePredictions = tool('noaa_marine_get_tide_predictions', {
   title: 'Get Tide Predictions',
-  description: `High and low tide predictions for a CO-OPS tide station over a date range. The default hilo interval returns the time, height, and tide type (H for high, L for low) of each event, while the 6-minute interval returns the detailed tide curve. Most tide stations are subordinate — CO-OPS derives their high and low events as offsets from a reference station and publishes no 6-minute curve for them — so interval="6min" reaches only a reference station, and a subordinate station comes back as subordinate_no_6min naming the reference station to ask instead; the prediction_class on a noaa_marine_find_stations tide row says which kind a station is before the call. Datum defaults to MLLW, mean lower low water, the standard for US nautical charts, and the date range is limited to 1 year per request. A range whose predictions fit the response budget is returned whole; a longer one is returned as a page of leading rows, and rows_matched, rows_returned, and next_offset then report how much matched and which offset reaches the rest, so a year of events is read by walking offset rather than by splitting the range. Use noaa_marine_find_stations first to resolve a station name or location to a numeric station ID.`,
+  description: `High and low tide predictions for a CO-OPS tide station over a date range. The default hilo interval returns the time, height, and tide type (H for high, L for low) of each event, while the 6-minute interval returns the detailed tide curve. Most tide stations are subordinate — CO-OPS derives their high and low events as offsets from a reference station and publishes no 6-minute curve for them — so interval="6min" reaches only a reference station, and a subordinate station comes back as subordinate_no_6min naming the reference station to ask instead; the prediction_class on a noaa_marine_find_stations tide row says which kind a station is before the call. Datum defaults to MLLW, mean lower low water, the standard for US nautical charts, and the date range is limited to 1 year per request. Each call returns up to limit predictions starting at offset; when the range matched more, rows_matched, rows_returned, and next_offset report how much matched and which offset reaches the rest, so a year of events is read by walking offset rather than by splitting the range. Use noaa_marine_find_stations first to resolve a station name or location to a numeric station ID.`,
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
@@ -35,7 +36,7 @@ export const noaaMarineGetTidePredictions = tool('noaa_marine_get_tide_predictio
       .enum(['MLLW', 'MHHW', 'MHW', 'MTL', 'MSL', 'MLW', 'DTL', 'NAVD', 'STND', 'CRD'])
       .default('MLLW')
       .describe(
-        "Datum the predicted heights are referenced to. MLLW (default) is the US nautical chart datum, and MHHW (mean higher high water) is the flooding reference; MHW, MTL, MSL, MLW, and DTL (diurnal tide level) are the other tidal planes. NAVD is NAVD88 and reads only where the station has an NAVD88 tie. STND is the station's own datum and is the plane that works where no tidal datum exists. CRD applies at Columbia River stations only. A datum this station does not carry comes back as datum_unavailable naming the ones it does.",
+        "Datum the predicted heights are referenced to. MLLW (default) is the US nautical chart datum, and MHHW (mean higher high water) is the flooding reference; MHW, MTL, MSL, MLW, and DTL (diurnal tide level) are the other tidal planes. NAVD is NAVD88 and reads only where the station has an NAVD88 tie. STND is the station's own datum and is the plane that works where no tidal datum exists. CRD applies at Columbia River stations only. A datum this station does not carry comes back as datum_unavailable, whose hint names a datum to retry with.",
       ),
     time_zone: z
       .enum(['lst_ldt', 'gmt', 'lst'])
@@ -53,22 +54,13 @@ export const noaaMarineGetTidePredictions = tool('noaa_marine_get_tide_predictio
       .describe(
         'Prediction interval: hilo (default) returns only high and low tide events; 6min returns a continuous prediction curve at 6-minute intervals, and is served only by a reference station — a subordinate station has no 6-minute curve.',
       ),
-    offset: z
-      .number()
-      .int()
-      .min(0)
-      .default(0)
-      .describe(
-        'Row offset into the matched prediction series, for reading a range whose rows do not fit one response. 0 (default) starts at the first row; pass the next_offset from a previous call to continue. An offset past the last row returns an empty page rather than an error.',
-      ),
-    limit: z
-      .number()
-      .int()
-      .min(1)
-      .optional()
-      .describe(
-        'Maximum prediction rows to return on this page, for a caller that wants fewer than the response budget allows. Omit for the largest page that fits; a value larger than the budget allows does not widen the page.',
-      ),
+    offset: offsetSchema(
+      'Row offset into the matched prediction series, for reading a range longer than one page. 0 (default) starts at the first row; pass the next_offset from a previous call to continue. An offset past the last row returns an empty page rather than an error.',
+    ),
+    limit: limitSchema(
+      'noaa_marine_get_tide_predictions',
+      'Prediction rows to return on this page.',
+    ),
   }),
 
   output: z.object({
@@ -102,7 +94,7 @@ export const noaaMarineGetTidePredictions = tool('noaa_marine_get_tide_predictio
           .describe('A single tide prediction event.'),
       )
       .describe(
-        'Tide predictions for the requested date range — the whole series when it fits one response, otherwise the leading page starting at offset. rows_matched and next_offset report what a page left behind.',
+        'Tide predictions for the requested date range — up to limit rows starting at offset, and the whole series when it fits one page. rows_matched and next_offset report what a page left behind.',
       ),
   }),
 
@@ -111,7 +103,7 @@ export const noaaMarineGetTidePredictions = tool('noaa_marine_get_tide_predictio
       .string()
       .optional()
       .describe(
-        'What this page of the prediction series covers and how to reach the next one. Present only when the response is a page rather than the whole matched series.',
+        'What this page of the prediction series covers and how to reach the next one, opening with the requested and applied values when limit was clamped to its cap. Present when the response is a page rather than the whole matched series, or limit was clamped.',
       ),
     truncated: z
       .boolean()
@@ -190,7 +182,7 @@ export const noaaMarineGetTidePredictions = tool('noaa_marine_get_tide_predictio
       code: JsonRpcErrorCode.InvalidParams,
       when: 'The station does not carry the requested datum — NAVD reads only where the station has an NAVD88 tie, and CRD only on the Columbia River.',
       recovery:
-        'Retry with a datum this station carries — MLLW is the plane every prediction station publishes, and the runtime hint names the alternatives.',
+        'Retry with a datum this station carries — the runtime hint names one to try, never the datum just rejected.',
     },
     {
       reason: 'upstream_throttled',
@@ -267,6 +259,15 @@ export const noaaMarineGetTidePredictions = tool('noaa_marine_get_tide_predictio
       // CO-OPS body-level errors carry a typed coopsReason — map to contract reasons.
       if (isCoopsBodyError(err)) {
         if (err.coopsReason === 'datum_unavailable') {
+          // The retry never names the datum CO-OPS just rejected, MLLW included.
+          const planes = (
+            [
+              ['MLLW', 'the US nautical chart datum'],
+              ['STND', "the station's own datum"],
+            ] as const
+          )
+            .filter(([datum]) => datum !== input.datum)
+            .map(([datum, gloss]) => `${datum}, ${gloss}`);
           throw ctx.fail(
             'datum_unavailable',
             `Station ${input.station_id} does not carry datum ${input.datum}.`,
@@ -277,7 +278,7 @@ export const noaaMarineGetTidePredictions = tool('noaa_marine_get_tide_predictio
                 hint:
                   input.datum === 'NAVD'
                     ? `Station ${input.station_id} has no NAVD88 tie. Retry with datum MLLW for chart-referenced heights, or STND for the station's own datum.`
-                    : `Station ${input.station_id} does not carry datum ${input.datum}. Retry with datum MLLW, the US nautical chart datum, or STND, the station's own datum.`,
+                    : `Station ${input.station_id} does not carry datum ${input.datum}. Retry with datum ${planes.join(', or ')}.`,
               },
             },
           );
@@ -339,20 +340,17 @@ export const noaaMarineGetTidePredictions = tool('noaa_marine_get_tide_predictio
       return entry;
     });
 
-    /*
-     * hilo crosses the response budget near four months and the 6-minute curve inside a
-     * single day, so the bound keys on serialized size rather than on the interval. A range
-     * that fits comes back whole and says nothing; anything longer is a page that discloses
-     * what it left behind.
-     */
-    const page = pageRows(predictions, {
-      offset: input.offset,
-      ...(input.limit === undefined ? {} : { limit: input.limit }),
-    });
+    // A range that fits one page comes back whole and discloses no page; anything longer is a
+    // page that says what it left behind. A clamp is named either way, ahead of the page.
+    const limit = clampLimit('noaa_marine_get_tide_predictions', input.limit, ctx);
+    const page = pageRows(predictions, { limit: limit.applied, offset: input.offset });
+    const notices: string[] = [];
+    if (limit.notice) notices.push(limit.notice);
     if (!page.whole) {
       ctx.enrich(pageDisclosure(page));
-      ctx.enrich.notice(pageNotice(page, 'predictions'));
+      notices.push(pageNotice(page, 'predictions'));
     }
+    if (notices.length > 0) ctx.enrich.notice(notices.join(' '));
 
     ctx.log.info('Tide predictions fetched', {
       station_id: input.station_id,

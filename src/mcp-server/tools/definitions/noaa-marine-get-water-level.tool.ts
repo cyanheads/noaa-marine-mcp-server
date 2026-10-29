@@ -6,18 +6,22 @@
 import { type Context, tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
+import { clampLimit, limitSchema, offsetSchema } from '@/mcp-server/tools/limit-clamp.js';
 import {
+  datumRetryHint,
   getCoopsService,
   isCoopsBodyError,
   isCoopsThrottled,
 } from '@/services/coops/coops-service.js';
 import {
   awaitsVerification,
+  beginsAfterStationDate,
   COOPS_DATE_FORM,
+  type StationClock,
   validateCoopsDateRange,
 } from '@/services/coops/date-range.js';
 import { pageDisclosure, pageNotice, pagePairedRows } from '@/services/coops/row-page.js';
-import type { CoopsPredictionRow } from '@/services/coops/types.js';
+import type { CoopsPredictionRow, CoopsStation } from '@/services/coops/types.js';
 
 /** The observed water-level cadences this tool serves, one CO-OPS product each. */
 type WaterLevelInterval = '6min' | 'hourly' | 'high_low' | 'daily_mean';
@@ -53,7 +57,7 @@ interface WaterLevelIntervalSpec {
  * quality flag, only `high_low` carries a classification, `daily_mean` has no paired
  * prediction series at all, and each has its own CO-OPS range ceiling. Coarser is not
  * automatically smaller either — a year of hourly rows outweighs a month of 6-minute ones —
- * so the range ceiling bounds the request and the response budget bounds the page.
+ * so the range ceiling bounds the request and `limit` bounds the page.
  */
 const WATER_LEVEL_INTERVALS: Record<WaterLevelInterval, WaterLevelIntervalSpec> = {
   '6min': { maxDays: 31, predictionInterval: '6', product: 'water_level', residual: true },
@@ -82,39 +86,39 @@ const WATER_LEVEL_INTERVALS: Record<WaterLevelInterval, WaterLevelIntervalSpec> 
  * upstream rather than refused on a catalog that could not confirm it.
  */
 async function isGreatLakesStation(stationId: string, ctx: Context): Promise<boolean | undefined> {
-  const [catalog] = await Promise.allSettled([getCoopsService().getStations('waterlevels', ctx)]);
-  if (catalog.status !== 'fulfilled') return undefined;
-  const station = catalog.value.find((s) => s.id === stationId);
-  return station === undefined ? undefined : Boolean(station.greatlakes);
+  const station = await getCoopsService().findStation('waterlevels', stationId, ctx);
+  return station ? Boolean(station.greatlakes) : undefined;
 }
 
 /**
- * Builds the recovery for a datum the station does not carry, naming the planes that do read it.
- *
- * The station's class is the whole answer and the `waterlevels` catalog already holds it, so the
- * catalog is read here — on the failure path only, and from a 6-hour cache after the first time.
- * Two sources that look authoritative are deliberately not used: the `supported Datum values`
- * list inside the CO-OPS rejection is station-specific and provably incomplete (it omits STND and
- * CRD at stations where both return data), and the per-station `datums.json` endpoint names its
- * datums differently from the data API and lists ones the data API rejects.
+ * The station's clock from the `waterlevels` catalog, for placing its local date. Undefined when
+ * the catalog could not be read or does not carry the station — the future-window check then
+ * falls back to a bound that leaves the window to CO-OPS.
  */
-async function datumRecoveryHint(stationId: string, datum: string, ctx: Context): Promise<string> {
-  const [catalog] = await Promise.allSettled([getCoopsService().getStations('waterlevels', ctx)]);
-  const station =
-    catalog.status === 'fulfilled' ? catalog.value.find((s) => s.id === stationId) : undefined;
+async function waterLevelStationClock(
+  stationId: string,
+  ctx: Context,
+): Promise<StationClock | undefined> {
+  const station = await getCoopsService().findStation('waterlevels', stationId, ctx);
+  if (typeof station?.timezonecorr !== 'number') return;
+  return { utcOffsetHours: station.timezonecorr, observesDst: station.observedst === true };
+}
 
-  if (station?.greatlakes) {
-    return `Station ${stationId} is a Great Lakes station and carries no tidal datum. Retry with datum STND or IGLD for its elevation, or LWD for height above Low Water Datum.`;
+/**
+ * The recovery for a station CO-OPS recognizes but that has never had a water-level gauge: a
+ * gauge nearby, and the predicted tide at the station itself when it is a tide-prediction
+ * station. The tide-prediction row carries the coordinates the nearby search needs.
+ */
+function noGaugeHint(stationId: string, tideStation: CoopsStation | undefined): string {
+  if (!tideStation) {
+    return `Find a water-level station near it with noaa_marine_find_stations and types=["water_level"].`;
   }
-  if (datum === 'NAVD') {
-    return `Station ${stationId} has no NAVD88 tie. Retry with datum MLLW for chart-referenced heights, or STND for the station's own datum.`;
-  }
-  return `Station ${stationId} does not carry datum ${datum}. Retry with datum MLLW, the US nautical chart datum, or STND, the station's own datum, which reads any station.`;
+  return `Find a water-level station nearby with noaa_marine_find_stations, latitude ${tideStation.lat}, longitude ${tideStation.lng}, and types=["water_level"]. For the predicted tide at station ${stationId}, call noaa_marine_get_tide_predictions with that station_id.`;
 }
 
 export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
   title: 'Get Water Level',
-  description: `Observed water level, real-time or historical, for a CO-OPS water-level station, paired with tide predictions for the same period so the residual (observed − predicted) shows storm surge when positive and anomalous drawdown when negative. The interval selects the cadence: 6min (default) is the full curve, hourly and high_low cover months to a year of the same series at far fewer rows, and daily_mean serves Great Lakes stations only. Each interval carries its own CO-OPS range ceiling — 31 days for 6min, 365 for hourly and high_low, 3655 for daily_mean — rejected locally before the call, and only 6min and hourly report a residual. Observations and predictions are fetched independently, so when the prediction series is empty, predictions_status says whether CO-OPS has none for this station and range or the prediction fetch failed — the observed series returns either way, and residual_summary is present only when both series are and the cadence supports the join. A sensor outage leaves slots with no reading; those slots are dropped and counted in gaps_dropped, so the observed series is continuous across the range only when that count is absent. A range whose rows fit the response budget is returned whole; a longer one returns the leading rows, with rows_matched, rows_returned, and next_offset reporting how much matched and which offset reaches the rest. Use noaa_marine_find_stations first to resolve a station name or location to a valid station ID.`,
+  description: `Observed water level, real-time or historical, for a CO-OPS water-level station, paired with tide predictions for the same period so the residual (observed − predicted) shows storm surge when positive and anomalous drawdown when negative. The interval selects the cadence: 6min (default) is the full curve, hourly and high_low cover months to a year of the same series at far fewer rows, and daily_mean serves Great Lakes stations only. Each interval carries its own CO-OPS range ceiling — 31 days for 6min, 365 for hourly and high_low, 3655 for daily_mean — rejected locally before the call, and only 6min and hourly report a residual. Observations and predictions are fetched independently, so when the prediction series is empty, predictions_status says whether CO-OPS has none for this station and range or the prediction fetch failed — the observed series returns either way, and residual_summary is present only when both series are and the cadence supports the join. A sensor outage leaves slots with no reading; those slots are dropped and counted in gaps_dropped, so the observed series is continuous across the range only when that count is absent. Each call returns up to limit observations from offset, with the predictions in their time span; a range of at most limit observations returns whole, and a longer one reports rows_matched, rows_returned, and next_offset, the offset that reaches the rest. Use noaa_marine_find_stations first to resolve a station name or location to a valid station ID.`,
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
@@ -150,7 +154,7 @@ export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
       ])
       .default('MLLW')
       .describe(
-        "Datum the observed heights are referenced to. MLLW (default) is the US nautical chart datum, and MHHW (mean higher high water) is the flooding reference; MHW, MTL, MSL, and MLW are the other tidal planes. NAVD is NAVD88 and reads only where the station has an NAVD88 tie. STND is the station's own datum and is the plane that works where no tidal datum exists. IGLD and LWD apply at Great Lakes stations only, CRD at Columbia River stations only, and LWI and HWI are lunitidal intervals rather than heights. A datum this station does not carry comes back as datum_unavailable naming the ones it does.",
+        "Datum the observed heights are referenced to. MLLW (default) is the US nautical chart datum, and MHHW (mean higher high water) is the flooding reference; MHW, MTL, MSL, and MLW are the other tidal planes. NAVD is NAVD88 and reads only where the station has an NAVD88 tie. STND is the station's own datum and is the plane that works where no tidal datum exists. IGLD and LWD apply at Great Lakes stations only, CRD at Columbia River stations only, and LWI and HWI are lunitidal intervals rather than heights. A datum this station does not carry comes back as datum_unavailable, whose hint names a datum to retry with, and a station with no water-level gauge at all as no_gauge.",
       ),
     time_zone: z
       .enum(['lst_ldt', 'gmt', 'lst'])
@@ -168,22 +172,13 @@ export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
       .describe(
         'Observed cadence. 6min (default) is the full curve, 31 days per request, the only one carrying a quality flag. hourly is hourly heights, 365 days per request, and reports a residual against the hourly prediction series. high_low is the observed high and low waters with their H/HH/L/LL classification, 365 days per request, and reports no residual because observed extremes do not fall on predicted extreme times. daily_mean is the daily mean water level, 3655 days per request, published at Great Lakes stations only and with no paired prediction series; a coastal station comes back as great_lakes_only.',
       ),
-    offset: z
-      .number()
-      .int()
-      .min(0)
-      .default(0)
-      .describe(
-        'Row offset into the matched observation series, for reading a range whose rows do not fit one response. 0 (default) starts at the first row; pass the next_offset from a previous call to continue. An offset past the last row returns an empty page rather than an error.',
-      ),
-    limit: z
-      .number()
-      .int()
-      .min(1)
-      .optional()
-      .describe(
-        'Maximum observation rows to return on this page, for a caller that wants fewer than the response budget allows. Omit for the largest page that fits; a value larger than the budget allows does not widen the page.',
-      ),
+    offset: offsetSchema(
+      'Row offset into the matched observation series, for reading a range longer than one page. 0 (default) starts at the first row; pass the next_offset from a previous call to continue. An offset past the last row returns an empty page rather than an error.',
+    ),
+    limit: limitSchema(
+      'noaa_marine_get_water_level',
+      'Observation rows to return on this page; predictions cover the same time span.',
+    ),
   }),
 
   output: z.object({
@@ -228,7 +223,7 @@ export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
           .describe('A single observed water level reading at the requested cadence.'),
       )
       .describe(
-        'Observed water level readings at the requested cadence — the whole matched series when it fits one response, otherwise the leading page starting at offset. rows_matched and next_offset report what a page left behind.',
+        'Observed water level readings at the requested cadence — the whole matched series when it holds at most limit rows, otherwise the page of up to limit rows starting at offset. rows_matched and next_offset report what a page left behind.',
       ),
     predictions: z
       .array(
@@ -242,7 +237,7 @@ export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
           .describe('A single tide prediction.'),
       )
       .describe(
-        'Paired tide predictions covering the same period as the returned observations, at the interval matching the observed cadence. Always empty on the daily_mean interval, which has no paired series. Otherwise empty when CO-OPS returned no predictions for this station and range, or when the prediction fetch failed — predictions_status says which.',
+        'Paired tide predictions covering the same period as the returned observations, at the interval matching the observed cadence. Every prediction in the page span is included and none repeats across pages, so a page whose span crosses a sensor outage carries more predictions than observations. Always empty on the daily_mean interval, which has no paired series. Otherwise empty when CO-OPS returned no predictions for this station and range, or when the prediction fetch failed — predictions_status says which.',
       ),
     residual_summary: z
       .object({
@@ -268,7 +263,7 @@ export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
       .string()
       .optional()
       .describe(
-        'Why the paired prediction series is missing or carries no residual, how many sample slots were dropped, and what this page of the observed series covers — whichever of those apply, composed into one string.',
+        'That limit was clamped to its cap, why the paired prediction series is missing or carries no residual, how many sample slots were dropped, and what this page of the observed series covers — whichever of those apply, composed into one string in that order.',
       ),
     predictions_status: z
       .enum(['empty', 'unavailable'])
@@ -347,7 +342,21 @@ export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
       code: JsonRpcErrorCode.NotFound,
       when: 'Station exists but no observed water-level data for the date range — including an hourly, high_low, or daily_mean window ending before the prior month, which is not a verification lag.',
       recovery:
-        'The station may be offline, its record may begin after the window, or the window may be in the future. Try a different date range or station.',
+        'The station may be offline, or its record may begin after the window. Try a different date range or station.',
+    },
+    {
+      reason: 'future_window',
+      code: JsonRpcErrorCode.ValidationError,
+      when: "begin_date is after the station's current date in the zone CO-OPS reads the dates in — the UTC date under time_zone gmt, the station's local date under lst and lst_ldt and on interval daily_mean — so no observation in the window exists yet.",
+      recovery:
+        'Request a window that begins on or before the current date. For the tide expected in this window, call noaa_marine_get_tide_predictions with this station_id, which serves tidal stations but not Great Lakes ones.',
+    },
+    {
+      reason: 'no_gauge',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'CO-OPS rejected the datum at a station that is in neither its active nor its historic water-level station list, so the station has never had a water-level gauge and holds no observed water levels at any datum.',
+      recovery:
+        'Find a water-level station near it with noaa_marine_find_stations and types=["water_level"], or call noaa_marine_get_tide_predictions with this station_id when it is a tide-prediction station.',
     },
     {
       reason: 'great_lakes_only',
@@ -368,7 +377,7 @@ export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
       code: JsonRpcErrorCode.InvalidParams,
       when: 'The station does not carry the requested datum — a Great Lakes station has no tidal datum, and NAVD reads only where the station has an NAVD88 tie.',
       recovery:
-        'Retry with a datum this station carries — STND reads any station, and the runtime hint names the specific planes available here.',
+        'Retry with a datum this station carries — STND reads any water-level gauge, and the runtime hint names a datum to retry with, never the one just rejected.',
     },
     {
       reason: 'upstream_throttled',
@@ -393,6 +402,24 @@ export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
       throw ctx.fail(
         'date_range_exceeded',
         `Date range of ${Math.ceil(range.spanDays)} days exceeds the ${spec.maxDays}-day CO-OPS limit for the ${input.interval} interval.`,
+      );
+    }
+
+    /*
+     * A window that starts after the station's current date can hold no observation, and CO-OPS
+     * answers it with the same empty sentence it sends an outage or a window before the record —
+     * or, on the coarser products, with the verification-lag one. Refused here, before any
+     * request, in the zone CO-OPS reads the dates in: daily_mean is served in LST only.
+     */
+    const timeZone = spec.product === 'daily_mean' ? 'lst' : input.time_zone;
+    if (
+      await beginsAfterStationDate(range.begin, timeZone, () =>
+        waterLevelStationClock(input.station_id, ctx),
+      )
+    ) {
+      throw ctx.fail(
+        'future_window',
+        `begin_date ${input.begin_date} is after the current date at station ${input.station_id} in time zone ${timeZone}, so CO-OPS holds no observations for the window yet.`,
       );
     }
 
@@ -442,11 +469,26 @@ export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
       const err = obsResult.reason;
       // CO-OPS body-level errors carry a typed coopsReason — map to contract reasons.
       if (isCoopsBodyError(err)) {
+        /*
+         * CO-OPS rejects the datum at a station that has never had a gauge, too. The catalogs tell
+         * the two apart, read on this failure path only: `waterlevels` lists the active gauges and
+         * `historicwl` the stations with a record, so one in neither has no water levels at any
+         * datum. A catalog that cannot be read leaves the datum retry standing.
+         */
         if (err.coopsReason === 'datum_unavailable') {
+          const gauge = await svc.lookupGauge(input.station_id, ctx);
+          if (gauge.kind === 'no_gauge') {
+            throw ctx.fail(
+              'no_gauge',
+              `Station ${input.station_id} has no water-level gauge, so CO-OPS holds no observed water levels for it at any datum.`,
+              { recovery: { hint: noGaugeHint(input.station_id, gauge.tideStation) } },
+            );
+          }
+          const greatLakes = gauge.kind === 'gauge' && gauge.station.greatlakes === true;
           throw ctx.fail(
             'datum_unavailable',
             `Station ${input.station_id} does not carry datum ${input.datum}.`,
-            { recovery: { hint: await datumRecoveryHint(input.station_id, input.datum, ctx) } },
+            { recovery: { hint: datumRetryHint(input.station_id, input.datum, greatLakes) } },
           );
         }
         if (err.coopsReason === 'station_error') {
@@ -557,8 +599,11 @@ export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
       value: Number.parseFloat(p.v),
     }));
 
-    // Both disclosures can fire on one response, and notice is last-wins — compose once.
+    // Several disclosures can fire on one response, and notice is last-wins — compose once,
+    // with the clamp first: it says what the caller's own request was turned into.
+    const limit = clampLimit('noaa_marine_get_water_level', input.limit, ctx);
     const notices: string[] = [];
+    if (limit.notice) notices.push(limit.notice);
 
     // Why this cadence reports no residual, on the two that report none. Said up front, so an
     // absent residual_summary is never read as a quiet failure to compute one.
@@ -632,15 +677,13 @@ export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
     }
 
     /*
-     * One day of the 6-minute series already outruns the response budget, and so does a year
-     * of hourly rows, so the page is bounded by the serialized size of the two row arrays
-     * together. The observed series carries the offset and the predictions follow it by time
+     * The observed series carries the offset and limit, and the predictions follow it by time
      * window rather than by index: gap-dropped rows leave the two different lengths, so equal
      * index slices would pair rows from different instants.
      */
     const paged = pagePairedRows(observations, predictions, {
       offset: input.offset,
-      ...(input.limit === undefined ? {} : { limit: input.limit }),
+      limit: limit.applied,
     });
     if (!paged.page.whole) {
       ctx.enrich(pageDisclosure(paged.page));

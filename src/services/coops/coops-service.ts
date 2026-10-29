@@ -243,9 +243,74 @@ const DATA_URL = 'https://api.tidesandcurrents.noaa.gov/api/prod/datagetter';
 const MDAPI_URL = 'https://api.tidesandcurrents.noaa.gov/mdapi/prod/webapi/stations.json';
 const CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
 
+/**
+ * One deadline for a best-effort catalog lookup, across every catalog it reads, their retries,
+ * and backoff. A lookup only refines a hint or a pre-check, so it gives up well inside the
+ * 60-second client request timeout rather than spending it.
+ */
+const CATALOG_LOOKUP_BUDGET_MS = 15_000;
+
+/** The request's signal, plus the catalog-lookup budget. */
+function lookupDeadline(ctx: Context): AbortSignal {
+  return AbortSignal.any([ctx.signal, AbortSignal.timeout(CATALOG_LOOKUP_BUDGET_MS)]);
+}
+
 interface CacheEntry {
   fetchedAt: number;
   stations: CoopsStation[];
+}
+
+/**
+ * What the water-level catalogs say about a station's gauge, for a datum rejection's recovery.
+ *
+ *   'gauge'    — listed in `waterlevels` or `historicwl`; `station` is that row, whose `greatlakes`
+ *                flag decides which datums read it
+ *   'no_gauge' — in neither, so it has never had one; `tideStation` is its `tidepredictions` row
+ *                when that catalog lists it
+ *   'unknown'  — a catalog the answer depends on could not be read
+ */
+export type GaugeLookup =
+  | { kind: 'gauge'; station: CoopsStation }
+  | { kind: 'no_gauge'; tideStation?: CoopsStation }
+  | { kind: 'unknown' };
+
+/** `A`, `A or B`, `A, B, or C`. */
+function joinOr(items: readonly string[]): string {
+  if (items.length <= 2) return items.join(' or ');
+  return `${items.slice(0, -1).join(', ')}, or ${items.at(-1)}`;
+}
+
+/**
+ * The retry for a datum CO-OPS rejected at a station that has (or may have) a gauge: the planes
+ * that read the station, never the one just rejected. A Great Lakes station carries no tidal
+ * datum, so it is offered its own three; a coastal one the chart datum and its station datum.
+ *
+ * Two sources that look authoritative are deliberately not used: the `supported Datum values`
+ * list inside a CO-OPS rejection is station-specific and provably incomplete (it omits STND and
+ * CRD at stations where both return data), and the per-station `datums.json` endpoint names its
+ * datums differently from the data API and lists ones the data API rejects.
+ */
+export function datumRetryHint(stationId: string, rejected: string, greatLakes: boolean): string {
+  const retry = (lead: string, planes: readonly (readonly [string, string])[]) =>
+    `${lead} Retry with datum ${joinOr(
+      planes.filter(([datum]) => datum !== rejected).map(([datum, gloss]) => `${datum} (${gloss})`),
+    )}.`;
+
+  if (greatLakes) {
+    return retry(`Station ${stationId} is a Great Lakes station and carries no tidal datum.`, [
+      ['STND', "the station's own datum"],
+      ['IGLD', 'its elevation on the International Great Lakes Datum'],
+      ['LWD', 'height above Low Water Datum'],
+    ]);
+  }
+  const lead =
+    rejected === 'NAVD'
+      ? `Station ${stationId} has no NAVD88 tie.`
+      : `Station ${stationId} does not carry datum ${rejected}.`;
+  return retry(lead, [
+    ['MLLW', 'the US nautical chart datum'],
+    ['STND', "the station's own datum, which reads any gauge"],
+  ]);
 }
 
 export class CoopsService {
@@ -255,12 +320,23 @@ export class CoopsService {
   private resolvedStates?: { catalogs: CoopsCatalogs; states: ReadonlyMap<string, StationState> };
 
   // AppConfig and StorageService accepted for init-pattern consistency; not used at runtime
-  constructor(_config: AppConfig, _storage: StorageService, serverConfig: ServerConfig) {
+  constructor(
+    _config: AppConfig,
+    _storage: StorageService,
+    serverConfig: Pick<ServerConfig, 'applicationId'>,
+  ) {
     this.applicationId = serverConfig.applicationId;
   }
 
-  /** Fetch (or return cached) station list for the given type. */
-  async getStations(type: CoopsStationType, ctx: Context): Promise<CoopsStation[]> {
+  /**
+   * Fetch (or return cached) station list for the given type. `signal` defaults to the request's;
+   * a best-effort lookup passes one that also carries its own deadline.
+   */
+  async getStations(
+    type: CoopsStationType,
+    ctx: Context,
+    signal: AbortSignal = ctx.signal,
+  ): Promise<CoopsStation[]> {
     const entry = this.stationCache.get(type);
     if (entry && Date.now() - entry.fetchedAt < CACHE_TTL_MS) {
       return entry.stations;
@@ -269,9 +345,7 @@ export class CoopsService {
     const stations = await withRetry(
       async () => {
         const url = `${MDAPI_URL}?type=${type}&application=${encodeURIComponent(this.applicationId)}`;
-        const response = await fetchWithTimeout(url, 15_000, ctx, {
-          signal: ctx.signal,
-        });
+        const response = await fetchWithTimeout(url, 15_000, ctx, { signal });
         const text = await response.text();
         this.detectHtmlError(text);
         const parsed: CoopsStationListResponse = JSON.parse(text);
@@ -282,7 +356,7 @@ export class CoopsService {
         context: ctx,
         baseDelayMs: 2000,
         maxRetries: 2,
-        signal: ctx.signal,
+        signal,
       },
     ).catch((err: unknown) => {
       throw throttledError(err) ?? err;
@@ -291,6 +365,44 @@ export class CoopsService {
     this.stationCache.set(type, { stations, fetchedAt: Date.now() });
     ctx.log.debug('CO-OPS station list cached', { type, count: stations.length });
     return stations;
+  }
+
+  /**
+   * A station's row in one catalog, read best-effort for a hint or a pre-check: the row, `null`
+   * when the catalog does not list the station, or `undefined` when the catalog could not be read
+   * before `deadline` (by default the request's signal plus a 15-second budget). The caller's
+   * cancellation is rethrown, never read as an unreadable catalog.
+   */
+  async findStation(
+    type: CoopsStationType,
+    stationId: string,
+    ctx: Context,
+    deadline: AbortSignal = lookupDeadline(ctx),
+  ): Promise<CoopsStation | null | undefined> {
+    try {
+      const stations = await this.getStations(type, ctx, deadline);
+      return stations.find((s) => s.id === stationId) ?? null;
+    } catch (err) {
+      if (ctx.signal.aborted) throw err;
+      return;
+    }
+  }
+
+  /**
+   * Whether a station whose datum CO-OPS just rejected has a water-level gauge at all. Reads
+   * `historicwl` only for a station absent from `waterlevels`, and `tidepredictions` only for one
+   * absent from both — so a station listed as an active gauge costs no extra catalog — under one
+   * deadline shared by all three reads.
+   */
+  async lookupGauge(stationId: string, ctx: Context): Promise<GaugeLookup> {
+    const deadline = lookupDeadline(ctx);
+    for (const type of ['waterlevels', 'historicwl'] as const) {
+      const station = await this.findStation(type, stationId, ctx, deadline);
+      if (station === undefined) return { kind: 'unknown' };
+      if (station) return { kind: 'gauge', station };
+    }
+    const tideStation = await this.findStation('tidepredictions', stationId, ctx, deadline);
+    return tideStation ? { kind: 'no_gauge', tideStation } : { kind: 'no_gauge' };
   }
 
   /**
@@ -662,7 +774,7 @@ let _service: CoopsService | undefined;
 export function initCoopsService(
   config: AppConfig,
   storage: StorageService,
-  serverConfig: ServerConfig,
+  serverConfig: Pick<ServerConfig, 'applicationId'>,
 ): void {
   _service = new CoopsService(config, storage, serverConfig);
 }

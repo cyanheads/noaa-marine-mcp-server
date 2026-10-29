@@ -3,14 +3,22 @@
  * @module tests/mcp-server/tools/noaa-marine-get-water-level.tool.test
  */
 
+import { z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import {
+  createFetchMock,
+  createMockContext,
+  type FetchMockHarness,
+  runToolContract,
+} from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import { noaaMarineGetWaterLevel } from '@/mcp-server/tools/definitions/noaa-marine-get-water-level.tool.js';
-import { initCoopsService } from '@/services/coops/coops-service.js';
+import { type CoopsService, initCoopsService } from '@/services/coops/coops-service.js';
+import type { CoopsStation, CoopsStationType } from '@/services/coops/types.js';
 import {
   type CoopsResponder,
   callsTo,
+  coopsEndpoint,
   healthyCoops,
   installCoopsFake,
 } from '../../support/coops-http.js';
@@ -308,12 +316,23 @@ describe('noaaMarineGetWaterLevel', () => {
       ).toThrow();
     });
 
+    /** Serves each catalog type its own list, as CO-OPS does — never one list for every type. */
+    function mockCatalogs(
+      svc: CoopsService,
+      lists: Partial<Record<CoopsStationType, CoopsStation[]>>,
+    ) {
+      return vi.spyOn(svc, 'getStations').mockImplementation(async (type) => {
+        const list = lists[type];
+        if (!list) throw new Error(`Unexpected catalog read: ${type}`);
+        return list;
+      });
+    }
+
     it('reports a datum the station does not carry as datum_unavailable, naming the Great Lakes datums', async () => {
       const ctx = createMockContext({ errors: noaaMarineGetWaterLevel.errors });
       const { CoopsBodyError, getCoopsService } = await import('@/services/coops/coops-service.js');
       const svc = getCoopsService();
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      vi.spyOn(svc, 'getStations').mockResolvedValue([GREAT_LAKES_STATION] as any);
+      mockCatalogs(svc, { waterlevels: [GREAT_LAKES_STATION] });
       vi.spyOn(svc, 'fetchWaterLevel').mockRejectedValue(
         new CoopsBodyError(
           'datum_unavailable',
@@ -344,8 +363,7 @@ describe('noaaMarineGetWaterLevel', () => {
       const ctx = createMockContext({ errors: noaaMarineGetWaterLevel.errors });
       const { CoopsBodyError, getCoopsService } = await import('@/services/coops/coops-service.js');
       const svc = getCoopsService();
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      vi.spyOn(svc, 'getStations').mockResolvedValue([COASTAL_STATION] as any);
+      mockCatalogs(svc, { waterlevels: [COASTAL_STATION] });
       vi.spyOn(svc, 'fetchWaterLevel').mockRejectedValue(
         new CoopsBodyError(
           'datum_unavailable',
@@ -375,8 +393,7 @@ describe('noaaMarineGetWaterLevel', () => {
       const ctx = createMockContext({ errors: noaaMarineGetWaterLevel.errors });
       const { CoopsBodyError, getCoopsService } = await import('@/services/coops/coops-service.js');
       const svc = getCoopsService();
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      vi.spyOn(svc, 'getStations').mockResolvedValue([COASTAL_STATION] as any);
+      mockCatalogs(svc, { waterlevels: [COASTAL_STATION] });
       vi.spyOn(svc, 'fetchWaterLevel').mockRejectedValue(
         new CoopsBodyError(
           'datum_unavailable',
@@ -446,6 +463,534 @@ describe('noaaMarineGetWaterLevel', () => {
       // Not 'unavailable' — CO-OPS answered, and its answer was "none exist". Telling the caller
       // to retry would be advice for a condition that will never change.
       expect(structured.predictions_status).toBe('empty');
+    });
+  });
+
+  // --- #50: a station that has never had a gauge is not a datum problem ---
+
+  describe('station with no gauge', () => {
+    /** Live catalog rows, trimmed to the fields the tool reads. */
+    const HONOLULU = {
+      id: '1612340',
+      name: 'Honolulu',
+      lat: 21.303333,
+      lng: -157.86453,
+      greatlakes: false,
+      timezonecorr: -10,
+      observedst: false,
+    };
+    /** Port Allen: a retired gauge (1988–1997), in `historicwl` but not `waterlevels`. */
+    const PORT_ALLEN = {
+      id: '1611347',
+      name: 'PORT ALLEN, HANAPEPE BAY, KAUAI ISLAND',
+      lat: 21.9033,
+      lng: -159.592,
+      greatlakes: false,
+      timezonecorr: -10,
+      observedst: false,
+    };
+    /** Waimea Bay: a subordinate tide-prediction station that has never had a gauge. */
+    const WAIMEA_TIDE = {
+      id: '1611401',
+      name: 'Waimea Bay',
+      lat: 21.9567,
+      lng: -159.673,
+      type: 'S',
+      reference_id: '1611400',
+    };
+    const CATALOGS: Record<string, readonly Record<string, unknown>[] | number> = {
+      waterlevels: [HONOLULU],
+      historicwl: [HONOLULU, PORT_ALLEN],
+      tidepredictions: [WAIMEA_TIDE, { ...PORT_ALLEN, type: 'R' }, { ...HONOLULU, type: 'R' }],
+    };
+
+    /** The HTTP 400 CO-OPS sends when the station has no row at the requested datum. */
+    const noDatum = (datum: string, station: string) => () =>
+      new Response(
+        JSON.stringify({ error: { message: ` There is no ${datum} for the station: ${station}` } }),
+        { status: 400 },
+      );
+    /** The HTTP 400 CO-OPS sends for NAVD at a station with no NAVD88 tie. */
+    const supportedDatums = () =>
+      new Response(
+        JSON.stringify({
+          error: {
+            message: ' The supported Datum values are: MHHW, MHW, MTL, MSL, MLW, MLLW, LWI, HWI',
+          },
+        }),
+        { status: 400 },
+      );
+
+    /** Catalogs per type (a number fails that read), and the observed product's answer. */
+    function upstream(
+      observed: () => Response,
+      catalogs: Record<string, readonly Record<string, unknown>[] | number> = CATALOGS,
+    ): CoopsResponder {
+      return (endpoint, url) => {
+        if (endpoint === 'catalog') {
+          const list = catalogs[url.searchParams.get('type') ?? ''];
+          if (list === undefined) throw new Error(`Unexpected catalog read: ${url}`);
+          return typeof list === 'number'
+            ? new Response('catalog error', { status: list })
+            : Response.json({ stations: list });
+        }
+        if (url.searchParams.get('product') === 'predictions') {
+          return Response.json({ predictions: [] });
+        }
+        return observed();
+      };
+    }
+
+    type Result = Awaited<ReturnType<typeof runToolContract>>;
+    const errorOf = (r: Result) =>
+      (r.structuredContent as { error: { code: number; data?: Record<string, unknown> } }).error;
+    const hintOf = (r: Result) =>
+      (errorOf(r).data?.recovery as { hint?: string } | undefined)?.hint ?? '';
+    const textOf = (r: Result) =>
+      r.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
+    /** The retry clause of a datum hint — where a rejected datum must never reappear. */
+    const retryClause = (hint: string) => hint.slice(hint.indexOf('Retry with'));
+    const catalogTypes = (h: FetchMockHarness) =>
+      callsTo(h, 'catalog').map((u) => u.searchParams.get('type'));
+
+    let http: FetchMockHarness | undefined;
+    afterEach(() => {
+      http?.restore();
+      http = undefined;
+    });
+
+    it('fails no_gauge at a tide-prediction station with no gauge, on both surfaces', async () => {
+      http = installCoopsFake(upstream(noDatum('MLLW', '1611401')));
+      const result = await runToolContract(noaaMarineGetWaterLevel, {
+        station_id: '1611401',
+        begin_date: '20261028',
+        end_date: '20261028',
+      });
+      const error = errorOf(result);
+      const hint = hintOf(result);
+
+      expect(result.isError).toBe(true);
+      expect(error.code).toBe(JsonRpcErrorCode.NotFound);
+      expect(error.data?.reason).toBe('no_gauge');
+      expect(hint).toContain('noaa_marine_find_stations');
+      expect(hint).toContain('latitude 21.9567, longitude -159.673');
+      expect(hint).toContain('noaa_marine_get_tide_predictions');
+      expect(hint).toContain('1611401');
+      // Not the datum retry: no datum reads a station with no gauge.
+      expect(hint).not.toContain('Retry with datum');
+
+      const text = textOf(result);
+      expect(text).toContain('no water-level gauge');
+      expect(text).toContain('noaa_marine_find_stations');
+      expect(text).toContain('noaa_marine_get_tide_predictions');
+      expect(text).toContain('(reason no_gauge');
+      expect(catalogTypes(http)).toEqual(['waterlevels', 'historicwl', 'tidepredictions']);
+    });
+
+    it('names no tide-prediction tool for a no-gauge station absent from tidepredictions', async () => {
+      http = installCoopsFake(
+        upstream(noDatum('MLLW', '1611401'), { ...CATALOGS, tidepredictions: [] }),
+      );
+      const result = await runToolContract(noaaMarineGetWaterLevel, {
+        station_id: '1611401',
+        begin_date: '20261028',
+        end_date: '20261028',
+      });
+
+      expect(errorOf(result).data?.reason).toBe('no_gauge');
+      expect(hintOf(result)).toContain('noaa_marine_find_stations');
+      expect(hintOf(result)).not.toContain('noaa_marine_get_tide_predictions');
+    });
+
+    it('returns rows at Port Allen in its record years, reading no catalog', async () => {
+      http = installCoopsFake(
+        upstream(() =>
+          Response.json({
+            metadata: { name: 'Port Allen' },
+            data: [{ t: '1996-01-01 00:00', v: '1.23', s: '0.01', f: '0,0,0,0', q: 'v' }],
+          }),
+        ),
+      );
+      const result = await runToolContract(noaaMarineGetWaterLevel, {
+        station_id: '1611347',
+        begin_date: '19960101',
+        end_date: '19960101',
+      });
+
+      expect(result.isError).toBeFalsy();
+      expect((result.structuredContent as { observations: unknown[] }).observations).toHaveLength(
+        1,
+      );
+      expect(callsTo(http, 'catalog')).toHaveLength(0);
+    });
+
+    it('keeps datum_unavailable and the NAVD88 hint at Port Allen, a retired gauge absent from waterlevels', async () => {
+      http = installCoopsFake(upstream(supportedDatums));
+      const result = await runToolContract(noaaMarineGetWaterLevel, {
+        station_id: '1611347',
+        begin_date: '19960101',
+        end_date: '19960101',
+        datum: 'NAVD',
+      });
+
+      expect(errorOf(result).code).toBe(JsonRpcErrorCode.InvalidParams);
+      expect(errorOf(result).data?.reason).toBe('datum_unavailable');
+      expect(hintOf(result)).toContain('NAVD88');
+      expect(retryClause(hintOf(result))).toContain('MLLW');
+      expect(retryClause(hintOf(result))).not.toContain('NAVD');
+      // historicwl settled it; tidepredictions was never needed.
+      expect(catalogTypes(http)).toEqual(['waterlevels', 'historicwl']);
+    });
+
+    it('keeps datum_unavailable at Honolulu, an active gauge, from waterlevels alone', async () => {
+      http = installCoopsFake(upstream(supportedDatums));
+      const result = await runToolContract(noaaMarineGetWaterLevel, {
+        station_id: '1612340',
+        begin_date: '20261028',
+        end_date: '20261028',
+        datum: 'NAVD',
+      });
+
+      expect(errorOf(result).data?.reason).toBe('datum_unavailable');
+      expect(hintOf(result)).toContain('NAVD88');
+      expect(catalogTypes(http)).toEqual(['waterlevels']);
+    });
+
+    it('names STND, not MLLW, when a gauge rejects MLLW', async () => {
+      http = installCoopsFake(upstream(noDatum('MLLW', '1612340')));
+      const result = await runToolContract(noaaMarineGetWaterLevel, {
+        station_id: '1612340',
+        begin_date: '20261028',
+        end_date: '20261028',
+      });
+      const retry = retryClause(hintOf(result));
+
+      expect(errorOf(result).data?.reason).toBe('datum_unavailable');
+      expect(retry).toContain('STND');
+      expect(retry).not.toContain('MLLW');
+      expect(textOf(result)).toContain(retry);
+    });
+
+    it('leaves the datum retry standing when historicwl cannot be read', async () => {
+      http = installCoopsFake(
+        upstream(noDatum('MLLW', '1611401'), { ...CATALOGS, historicwl: 404 }),
+      );
+      const result = await runToolContract(noaaMarineGetWaterLevel, {
+        station_id: '1611401',
+        begin_date: '20261028',
+        end_date: '20261028',
+      });
+
+      expect(errorOf(result).data?.reason).toBe('datum_unavailable');
+      expect(retryClause(hintOf(result))).toContain('STND');
+      expect(retryClause(hintOf(result))).not.toContain('MLLW');
+    });
+
+    it("rethrows the caller's cancellation during the catalog lookup instead of answering a hint", async () => {
+      const caller = new AbortController();
+      http = installCoopsFake((endpoint, url) => {
+        if (endpoint === 'catalog' && url.searchParams.get('type') === 'historicwl') {
+          caller.abort(new DOMException('Client cancelled', 'AbortError'));
+          return new Response('upstream down', { status: 503 });
+        }
+        return upstream(noDatum('MLLW', '1611401'))(endpoint, url);
+      });
+      const ctx = createMockContext({
+        errors: noaaMarineGetWaterLevel.errors,
+        signal: caller.signal,
+      });
+      const input = noaaMarineGetWaterLevel.input.parse({
+        station_id: '1611401',
+        begin_date: '20261028',
+        end_date: '20261028',
+      });
+      const err = await Promise.resolve(noaaMarineGetWaterLevel.handler(input, ctx)).catch(
+        (e: unknown) => e,
+      );
+
+      expect(err).toBeInstanceOf(Error);
+      // A swallowed cancellation would read as an unreadable catalog and answer datum_unavailable.
+      expect((err as McpError).data?.reason).toBeUndefined();
+      expect(catalogTypes(http)).toEqual(['waterlevels', 'historicwl']);
+    });
+  });
+
+  // --- #45: a window that starts after the station's current date fails before any request ---
+
+  describe('window in the future', () => {
+    /** Live `waterlevels` rows, trimmed to the fields the check reads. */
+    const WATERLEVELS = [
+      {
+        id: '8654467',
+        name: 'USCG Station Hatteras',
+        lat: 35.2086,
+        lng: -75.7042,
+        greatlakes: false,
+        timezonecorr: -5,
+        observedst: true,
+      },
+      {
+        id: '1820000',
+        name: 'Kwajalein, Marshall Islands',
+        lat: 8.731667,
+        lng: 167.73611,
+        greatlakes: false,
+        timezonecorr: 12,
+        observedst: false,
+      },
+      {
+        id: '9087044',
+        name: 'Calumet Harbor',
+        lat: 41.72972,
+        lng: -87.53833,
+        greatlakes: true,
+        timezonecorr: -6,
+        observedst: true,
+      },
+    ];
+    const OBSERVED = {
+      metadata: { name: 'Station' },
+      data: [{ t: '2026-10-30 00:00', v: '1.230', s: '0.010', f: '0,0,0,0', q: 'p' }],
+    };
+
+    let http: FetchMockHarness | undefined;
+
+    /**
+     * The catalog answers by `catalog`; a catch-all route answers — and records — every other
+     * request, so a request that should never be sent is counted rather than thrown.
+     */
+    function upstream(catalog: () => Response = () => Response.json({ stations: WATERLEVELS })) {
+      http = createFetchMock([
+        { match: (request) => coopsEndpoint(request.url) === 'catalog', respond: catalog },
+        { match: () => true, respond: () => Response.json(OBSERVED) },
+      ]);
+      http.install();
+      return http;
+    }
+    const nonCatalogCalls = (h: FetchMockHarness) =>
+      h.calls.filter((call) => coopsEndpoint(call.request.url) !== 'catalog');
+
+    function now(iso: string): void {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(new Date(iso));
+    }
+
+    afterEach(() => {
+      vi.useRealTimers();
+      http?.restore();
+      http = undefined;
+    });
+
+    type Result = Awaited<ReturnType<typeof runToolContract>>;
+    const errorOf = (r: Result) =>
+      (r.structuredContent as { error: { code: number; data?: Record<string, unknown> } }).error;
+    const hintOf = (r: Result) =>
+      (errorOf(r).data?.recovery as { hint?: string } | undefined)?.hint ?? '';
+    const textOf = (r: Result) =>
+      r.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
+    const declared = noaaMarineGetWaterLevel.errors?.find(
+      (e) => e.reason === 'future_window',
+    )?.recovery;
+
+    it('refuses tomorrow at Hatteras before any CO-OPS data request, on both surfaces', async () => {
+      now('2026-10-29T16:00:00Z'); // 12:00 EDT
+      const h = upstream();
+      const result = await runToolContract(noaaMarineGetWaterLevel, {
+        station_id: '8654467',
+        begin_date: '20261030',
+        end_date: '20261031',
+      });
+      const error = errorOf(result);
+
+      expect(result.isError).toBe(true);
+      expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(error.data?.reason).toBe('future_window');
+      expect(hintOf(result)).toBe(declared);
+      expect(hintOf(result)).toContain('noaa_marine_get_tide_predictions');
+      const text = textOf(result);
+      expect(text).toContain('8654467');
+      expect(text).toContain('noaa_marine_get_tide_predictions');
+      expect(text).toContain('(reason future_window');
+      expect(nonCatalogCalls(h)).toHaveLength(0);
+      expect(callsTo(h, 'catalog').map((u) => u.searchParams.get('type'))).toEqual(['waterlevels']);
+    });
+
+    it('refuses the same window on hourly, instead of naming a verification lag', async () => {
+      now('2026-10-29T16:00:00Z');
+      const h = upstream();
+      const result = await runToolContract(noaaMarineGetWaterLevel, {
+        station_id: '8654467',
+        begin_date: '20261030',
+        end_date: '20261031',
+        interval: 'hourly',
+      });
+
+      expect(errorOf(result).data?.reason).toBe('future_window');
+      expect(nonCatalogCalls(h)).toHaveLength(0);
+    });
+
+    it('refuses a begin_date after the UTC date under gmt, sending no request at all', async () => {
+      now('2026-10-29T23:59:00Z');
+      const h = upstream();
+      const result = await runToolContract(noaaMarineGetWaterLevel, {
+        station_id: '1820000',
+        begin_date: '20261030',
+        end_date: '20261030',
+        time_zone: 'gmt',
+      });
+
+      expect(errorOf(result).data?.reason).toBe('future_window');
+      expect(textOf(result)).toContain('gmt');
+      expect(h.calls).toHaveLength(0);
+    });
+
+    it('sends a begin_date on the UTC date under gmt to CO-OPS', async () => {
+      now('2026-10-29T00:00:00Z');
+      const h = upstream();
+      const result = await runToolContract(noaaMarineGetWaterLevel, {
+        station_id: '8654467',
+        begin_date: '20261029',
+        end_date: '20261029',
+        time_zone: 'gmt',
+      });
+
+      expect(result.isError).toBeFalsy();
+      expect(nonCatalogCalls(h).length).toBeGreaterThan(0);
+    });
+
+    it('returns rows at Kwajalein on its local date while that date is ahead of UTC', async () => {
+      // 15:59 UTC on Oct 29 is 03:59 on Oct 30 at UTC+12 — CO-OPS returned 39 rows live.
+      now('2026-10-29T15:59:00Z');
+      const h = upstream();
+      const result = await runToolContract(noaaMarineGetWaterLevel, {
+        station_id: '1820000',
+        begin_date: '20261030',
+        end_date: '20261030',
+      });
+
+      expect(result.isError).toBeFalsy();
+      expect((result.structuredContent as { observations: unknown[] }).observations).toHaveLength(
+        1,
+      );
+      const observed = callsTo(h, 'data').find(
+        (u) => u.searchParams.get('product') === 'water_level',
+      );
+      expect(observed?.searchParams.get('begin_date')).toBe('20261030');
+    });
+
+    it('refuses the Kwajalein local date one minute before its midnight', async () => {
+      now('2026-10-29T11:59:00Z'); // 23:59 Oct 29 at UTC+12
+      const h = upstream();
+      const result = await runToolContract(noaaMarineGetWaterLevel, {
+        station_id: '1820000',
+        begin_date: '20261030',
+        end_date: '20261030',
+      });
+
+      expect(errorOf(result).data?.reason).toBe('future_window');
+      expect(nonCatalogCalls(h)).toHaveLength(0);
+    });
+
+    it('leaves a window beginning today and ending in the future unchanged, reading no catalog', async () => {
+      now('2026-10-29T16:00:00Z');
+      const h = upstream();
+      const result = await runToolContract(noaaMarineGetWaterLevel, {
+        station_id: '8654467',
+        begin_date: '20261029',
+        end_date: '20261031',
+      });
+
+      expect(result.isError).toBeFalsy();
+      expect(nonCatalogCalls(h).length).toBeGreaterThan(0);
+      expect(callsTo(h, 'catalog')).toHaveLength(0);
+    });
+
+    it('reads no catalog for a historical window', async () => {
+      now('2026-10-29T16:00:00Z');
+      const h = upstream();
+      const result = await runToolContract(noaaMarineGetWaterLevel, {
+        station_id: '8654467',
+        begin_date: '20250115',
+        end_date: '20250115',
+        interval: 'hourly',
+      });
+
+      expect(result.isError).toBeFalsy();
+      expect(callsTo(h, 'catalog')).toHaveLength(0);
+    });
+
+    it('reads daily_mean dates in LST, where the daylight hour does not apply', async () => {
+      // 05:30 UTC on Jul 15 is 00:30 Jul 15 at Calumet's daylight time, 23:30 Jul 14 in LST.
+      now('2026-07-15T05:30:00Z');
+      const h = upstream();
+      const daily = await runToolContract(noaaMarineGetWaterLevel, {
+        station_id: '9087044',
+        begin_date: '20260715',
+        end_date: '20260715',
+        interval: 'daily_mean',
+        datum: 'IGLD',
+      });
+      expect(errorOf(daily).data?.reason).toBe('future_window');
+      expect(textOf(daily)).toContain('lst');
+      expect(nonCatalogCalls(h)).toHaveLength(0);
+
+      const sixMinute = await runToolContract(noaaMarineGetWaterLevel, {
+        station_id: '9087044',
+        begin_date: '20260715',
+        end_date: '20260715',
+        datum: 'IGLD',
+      });
+      expect(sixMinute.isError).toBeFalsy();
+    });
+
+    it('leaves a window in the band to CO-OPS when the catalog cannot be read', async () => {
+      now('2026-10-29T16:00:00Z');
+      const h = upstream(() => new Response('catalog error', { status: 404 }));
+      const result = await runToolContract(noaaMarineGetWaterLevel, {
+        station_id: '8654467',
+        begin_date: '20261030',
+        end_date: '20261030',
+      });
+
+      expect(result.isError).toBeFalsy();
+      expect(nonCatalogCalls(h).length).toBeGreaterThan(0);
+    });
+
+    it("rethrows the caller's cancellation during the catalog read, sending no data request", async () => {
+      now('2026-10-29T16:00:00Z');
+      const caller = new AbortController();
+      const h = upstream(() => {
+        caller.abort(new DOMException('Client cancelled', 'AbortError'));
+        return new Response('upstream down', { status: 503 });
+      });
+      const ctx = createMockContext({
+        errors: noaaMarineGetWaterLevel.errors,
+        signal: caller.signal,
+      });
+      const input = noaaMarineGetWaterLevel.input.parse({
+        station_id: '8654467',
+        begin_date: '20261030',
+        end_date: '20261030',
+      });
+
+      await expect(noaaMarineGetWaterLevel.handler(input, ctx)).rejects.toBeInstanceOf(Error);
+      expect(nonCatalogCalls(h)).toHaveLength(0);
+    });
+
+    it('leaves no future-window clause in the generic no_data recovery', async () => {
+      http = createFetchMock([{ match: () => true, respond: () => Response.json({ data: [] }) }]);
+      http.install();
+      const result = await runToolContract(noaaMarineGetWaterLevel, {
+        station_id: '8654467',
+        begin_date: '20250115',
+        end_date: '20250115',
+      });
+
+      expect(errorOf(result).data?.reason).toBe('no_data');
+      expect(hintOf(result)).toBe(
+        'The station may be offline, or its record may begin after the window. Try a different date range or station.',
+      );
+      expect(hintOf(result)).not.toContain('future');
     });
   });
 
@@ -688,9 +1233,20 @@ describe('noaaMarineGetWaterLevel', () => {
     });
   });
 
-  // --- #18: the page is bounded by serialized payload size, identical on both surfaces ---
+  // --- #18, #49: the page is limit observations from offset, identical on both surfaces ---
 
   describe('paging', () => {
+    it('describes paging by count, with no response-size budget anywhere on the surface', () => {
+      const surface = JSON.stringify([
+        noaaMarineGetWaterLevel.description,
+        z.toJSONSchema(noaaMarineGetWaterLevel.input, { io: 'input' }),
+        z.toJSONSchema(noaaMarineGetWaterLevel.output),
+        z.toJSONSchema(z.object(noaaMarineGetWaterLevel.enrichment ?? {})),
+      ]);
+
+      expect(surface).not.toMatch(/budget|response size|fits? one response|largest page|byte/i);
+    });
+
     /** A 6-minute slot at its real CO-OPS width, three days of them — enough for several pages. */
     function slot(index: number): { f: string; q: string; s: string; t: string; v: string } {
       const minutes = index * 6;
@@ -722,25 +1278,135 @@ describe('noaaMarineGetWaterLevel', () => {
       vi.spyOn(svc, 'fetchWaterLevelPredictions').mockResolvedValue(THREE_DAYS_PRED);
     }
 
-    const BUDGET = 24_000;
-
-    it('bounds the page by serialized payload size rather than returning every row', async () => {
+    it('returns the default 50 observations and the predictions in their span when limit is omitted', async () => {
       await mockThreeDays();
       const result = await runToolContract(noaaMarineGetWaterLevel, {
         station_id: '9447130',
         begin_date: '20260901',
         end_date: '20260903',
       });
-      const structured = result.structuredContent as {
+      const structured = result.structuredContent as Record<string, unknown> & {
+        observations: { time: string }[];
+        predictions: { time: string }[];
+      };
+
+      expect(structured.observations.map((o) => o.time)).toEqual(
+        THREE_DAYS.slice(0, 50).map((r) => r.t),
+      );
+      expect(structured.predictions.map((p) => p.time)).toEqual(
+        THREE_DAYS_PRED.slice(0, 50).map((r) => r.t),
+      );
+      expect(structured.rows_matched).toBe(720);
+      expect(structured.next_offset).toBe(50);
+
+      // tools/list advertises the default and no ceiling on either count input.
+      const schema = z.toJSONSchema(noaaMarineGetWaterLevel.input, { io: 'input' }) as {
+        properties: Record<string, Record<string, unknown>>;
+      };
+      expect(schema.properties.limit).toMatchObject({ default: 50, minimum: 1 });
+      expect(schema.properties.limit).not.toHaveProperty('maximum');
+      expect(schema.properties.offset).toMatchObject({ default: 0, minimum: 0 });
+      expect(schema.properties.offset).not.toHaveProperty('maximum');
+    });
+
+    it('clamps limit 1001 to 1,000 observations and leads the notice with it on both surfaces', async () => {
+      const { getCoopsService } = await import('@/services/coops/coops-service.js');
+      const svc = getCoopsService();
+      const week = Array.from({ length: 1680 }, (_, i) => slot(i));
+      vi.spyOn(svc, 'fetchWaterLevel').mockResolvedValue({ data: week, stationName: 'Seattle' });
+      vi.spyOn(svc, 'fetchWaterLevelPredictions').mockResolvedValue(
+        week.map((row) => ({ t: row.t, v: row.v })),
+      );
+
+      const result = await runToolContract(noaaMarineGetWaterLevel, {
+        station_id: '9447130',
+        begin_date: '20260901',
+        end_date: '20260907',
+        limit: 1001,
+      });
+      const structured = result.structuredContent as Record<string, unknown> & {
         observations: unknown[];
         predictions: unknown[];
       };
 
-      expect(structured.observations.length).toBeLessThan(720);
-      expect(
-        JSON.stringify(structured.observations).length +
-          JSON.stringify(structured.predictions).length,
-      ).toBeLessThanOrEqual(BUDGET);
+      expect(result.isError).toBeFalsy();
+      expect(structured.observations).toHaveLength(1000);
+      expect(structured.predictions).toHaveLength(1000);
+      expect(structured.rows_matched).toBe(1680);
+      expect(structured.next_offset).toBe(1000);
+      const clamp = 'Requested limit 1001; applied limit 1000, the per-call cap.';
+      expect(String(structured.notice).startsWith(`${clamp} `)).toBe(true);
+      expect(String(structured.notice)).toContain('offset=1000');
+      const text = result.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
+      expect(text).toContain(clamp);
+    });
+
+    it('says it clamped limit on a whole page, ahead of the gap notice', async () => {
+      const { getCoopsService } = await import('@/services/coops/coops-service.js');
+      const svc = getCoopsService();
+      const rows = THREE_DAYS.slice(0, 5).map((row, i) =>
+        i === 2 ? { ...row, v: '', s: '' } : row,
+      );
+      vi.spyOn(svc, 'fetchWaterLevel').mockResolvedValue({ data: rows, stationName: 'Seattle' });
+      vi.spyOn(svc, 'fetchWaterLevelPredictions').mockResolvedValue(THREE_DAYS_PRED.slice(0, 5));
+
+      const result = await runToolContract(noaaMarineGetWaterLevel, {
+        station_id: '9447130',
+        begin_date: '20260901',
+        end_date: '20260901',
+        limit: 1001,
+      });
+      const structured = result.structuredContent as Record<string, unknown>;
+
+      expect(structured.observations).toHaveLength(4);
+      expect(structured).not.toHaveProperty('next_offset');
+      expect(structured).not.toHaveProperty('rows_matched');
+      expect(structured.notice).toMatch(
+        /^Requested limit 1001; applied limit 1000, the per-call cap\. 1 of the 5 sample slots /,
+      );
+    });
+
+    it('partitions the prediction series across an observation gap, counting only observations', async () => {
+      const { getCoopsService } = await import('@/services/coops/coops-service.js');
+      const svc = getCoopsService();
+      // A 60-slot sensor outage (slots 40–99) inside the first page's span: CO-OPS sends those
+      // slots with no reading, and still predicts them.
+      const outage = THREE_DAYS.map((row, i) =>
+        i >= 40 && i < 100 ? { ...row, v: '', s: '' } : row,
+      );
+      vi.spyOn(svc, 'fetchWaterLevel').mockResolvedValue({ data: outage, stationName: 'Seattle' });
+      vi.spyOn(svc, 'fetchWaterLevelPredictions').mockResolvedValue(THREE_DAYS_PRED);
+
+      const obsTimes: string[] = [];
+      const predTimes: string[] = [];
+      const pages: { obs: number; pred: number }[] = [];
+      let offset: number | null = 0;
+      while (offset !== null) {
+        const result = await runToolContract(noaaMarineGetWaterLevel, {
+          station_id: '9447130',
+          begin_date: '20260901',
+          end_date: '20260903',
+          offset,
+        });
+        const structured = result.structuredContent as {
+          next_offset?: number | null;
+          observations: { time: string }[];
+          predictions: { time: string }[];
+        };
+        obsTimes.push(...structured.observations.map((o) => o.time));
+        predTimes.push(...structured.predictions.map((p) => p.time));
+        pages.push({ obs: structured.observations.length, pred: structured.predictions.length });
+        offset = structured.next_offset ?? null;
+        expect(pages.length).toBeLessThan(40);
+      }
+
+      // limit bounds observations only: the first page's 50 readings end at slot 109, so it
+      // carries every prediction through slot 109 — the outage's 60 included.
+      expect(pages[0]).toEqual({ obs: 50, pred: 110 });
+      expect(pages[1]).toEqual({ obs: 50, pred: 50 });
+      expect(obsTimes).toHaveLength(660);
+      expect(new Set(obsTimes).size).toBe(660);
+      expect(predTimes).toEqual(THREE_DAYS_PRED.map((r) => r.t));
     });
 
     it('discloses the row accounting and the next offset on both consumption surfaces', async () => {
@@ -754,9 +1420,9 @@ describe('noaaMarineGetWaterLevel', () => {
 
       expect(structured.truncated).toBe(true);
       expect(structured.rows_matched).toBe(720);
-      expect(structured.rows_returned).toBe((structured.observations as unknown[]).length);
+      expect(structured.rows_returned).toBe(50);
       expect(structured.page_offset).toBe(0);
-      expect(structured.next_offset).toBe(structured.rows_returned);
+      expect(structured.next_offset).toBe(50);
 
       const text = result.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
       expect(text).toContain('720');
@@ -806,11 +1472,14 @@ describe('noaaMarineGetWaterLevel', () => {
         times.push(...structured.observations.map((o) => o.time));
         predTimes.push(...structured.predictions.map((p) => p.time));
         pages += 1;
-        offset = structured.next_offset ?? null;
+        // Each page steps the offset by exactly the rows it carried, 50 until the last.
+        const next = structured.next_offset ?? null;
+        if (next !== null) expect(next).toBe(offset + 50);
+        offset = next;
         expect(pages).toBeLessThan(40);
       }
 
-      expect(pages).toBeGreaterThanOrEqual(3);
+      expect(pages).toBe(15);
       expect(times).toEqual(THREE_DAYS.map((r) => r.t));
       expect(predTimes).toEqual(THREE_DAYS_PRED.map((r) => r.t));
     });
@@ -877,25 +1546,6 @@ describe('noaaMarineGetWaterLevel', () => {
       expect(structured.next_offset).toBe(3);
     });
 
-    it('never lets limit raise the page past the byte bound', async () => {
-      await mockThreeDays();
-      const bounded = await runToolContract(noaaMarineGetWaterLevel, {
-        begin_date: '20260901',
-        end_date: '20260903',
-        station_id: '9447130',
-      });
-      const raised = await runToolContract(noaaMarineGetWaterLevel, {
-        begin_date: '20260901',
-        end_date: '20260903',
-        limit: 10_000,
-        station_id: '9447130',
-      });
-
-      expect((raised.structuredContent as { observations: unknown[] }).observations).toHaveLength(
-        (bounded.structuredContent as { observations: unknown[] }).observations.length,
-      );
-    });
-
     it('computes the residual summary from the full matched series, not the page', async () => {
       const { getCoopsService } = await import('@/services/coops/coops-service.js');
       const svc = getCoopsService();
@@ -950,7 +1600,7 @@ describe('noaaMarineGetWaterLevel', () => {
       }
     });
 
-    it('returns a fitting range whole, with no paging disclosure at all', async () => {
+    it('returns a range of at most limit observations whole, with no paging disclosure at all', async () => {
       const { getCoopsService } = await import('@/services/coops/coops-service.js');
       const svc = getCoopsService();
       vi.spyOn(svc, 'fetchWaterLevel').mockResolvedValue({
@@ -1304,7 +1954,7 @@ describe('noaaMarineGetWaterLevel', () => {
       expect(svc.fetchWaterLevel).not.toHaveBeenCalled();
     });
 
-    it('accepts a year of hourly data, which the byte bound then pages', async () => {
+    it('accepts a year of hourly data, which then pages at the default count', async () => {
       const rows = Array.from({ length: 8760 }, (_, i) => ({
         f: '0,0',
         s: '0.026',
@@ -1322,7 +1972,8 @@ describe('noaaMarineGetWaterLevel', () => {
 
       expect(result.isError).toBeFalsy();
       expect(structured.rows_matched).toBe(8760);
-      expect((structured.observations as unknown[]).length).toBeLessThan(8760);
+      expect(structured.observations).toHaveLength(50);
+      expect(structured.next_offset).toBe(50);
       expect(structured.truncated).toBe(true);
     });
   });

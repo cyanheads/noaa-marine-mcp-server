@@ -3,6 +3,7 @@
  * @module tests/mcp-server/tools/noaa-marine-get-currents.tool.test
  */
 
+import { z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -625,7 +626,7 @@ describe('noaaMarineGetCurrents', () => {
     });
   });
 
-  // --- #18: the 6-minute curve is paged by serialized payload size; MAX_SLACK stays whole ---
+  // --- #18 / #49: both intervals page limit rows from offset, disclosed on both surfaces ---
 
   describe('paging', () => {
     /** 6-minute current rows at their real width. */
@@ -668,7 +669,7 @@ describe('noaaMarineGetCurrents', () => {
       Velocity_Major,
     }));
 
-    it('returns a MAX_SLACK day byte-identical to the unpaged output, with no disclosure', async () => {
+    it('returns a MAX_SLACK day of fewer than 50 events exactly as the unpaged output, with no disclosure', async () => {
       await mockCurrents({ events: FULL_DAY_EVENTS, stationName: 'Admiralty Inlet' });
       const result = await runToolContract(noaaMarineGetCurrents, {
         begin_date: '20250115',
@@ -698,7 +699,7 @@ describe('noaaMarineGetCurrents', () => {
       return rows;
     }
 
-    it('bounds a long MAX_SLACK range and discloses the page accounting', async () => {
+    it('pages a long MAX_SLACK range at the default of 50 events and discloses the accounting', async () => {
       const rows = maxSlackDays(365);
       await mockCurrents({ events: rows, stationName: 'Admiralty Inlet' });
       const result = await runToolContract(noaaMarineGetCurrents, {
@@ -708,20 +709,25 @@ describe('noaaMarineGetCurrents', () => {
       });
       const structured = result.structuredContent as {
         events: { time: string }[];
+        next_offset?: number | null;
+        notice?: string;
         rows_matched?: number;
         rows_returned?: number;
         truncated?: boolean;
       };
       const text = result.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
 
-      expect(structured.rows_matched).toBe(rows.length);
+      expect(structured.rows_matched).toBe(2920);
       expect(structured.truncated).toBe(true);
-      expect(structured.rows_returned).toBe(structured.events.length);
-      expect(structured.events.length).toBeLessThan(rows.length);
-      expect(JSON.stringify(structured.events).length).toBeLessThanOrEqual(24_000);
+      expect(structured.rows_returned).toBe(50);
+      expect(structured.events).toHaveLength(50);
+      expect(structured.next_offset).toBe(50);
+      expect(structured.notice).toBe(
+        'This page carries events 1–50 of 2920. Call again with offset=50 for the next page.',
+      );
       // Every event on the page reaches the text surface too — no head slice.
       for (const e of structured.events) expect(text).toContain(e.time);
-      expect(text).toContain('offset');
+      expect(text).toContain('offset=50');
     });
 
     it('walks a long MAX_SLACK range to the empty page and reassembles every event', async () => {
@@ -735,6 +741,7 @@ describe('noaaMarineGetCurrents', () => {
         const result = await runToolContract(noaaMarineGetCurrents, {
           begin_date: '20250101',
           end_date: '20251231',
+          limit: 500,
           offset,
           station_id: 'ACT1616',
         });
@@ -744,11 +751,11 @@ describe('noaaMarineGetCurrents', () => {
         };
         times.push(...structured.events.map((e) => e.time));
         pages += 1;
+        expect(structured.next_offset).toBe(pages === 6 ? null : offset + 500);
         offset = structured.next_offset ?? null;
-        expect(pages).toBeLessThan(40);
+        expect(pages).toBeLessThanOrEqual(6);
       }
 
-      expect(pages).toBeGreaterThanOrEqual(3);
       expect(times).toEqual(rows.map((r) => r.Time as string));
 
       const past = await runToolContract(noaaMarineGetCurrents, {
@@ -781,8 +788,8 @@ describe('noaaMarineGetCurrents', () => {
       expect(structured.depth).toBe(16);
     });
 
-    it('returns a fitting 6-minute range whole, with no paging disclosure', async () => {
-      await mockCurrents({ predictions: sixMin(120), stationName: 'Admiralty Inlet' });
+    it('returns a 6-minute range of exactly the default 50 rows whole, with no paging disclosure', async () => {
+      await mockCurrents({ predictions: sixMin(50), stationName: 'Admiralty Inlet' });
       const result = await runToolContract(noaaMarineGetCurrents, {
         begin_date: '20250115',
         end_date: '20250115',
@@ -791,10 +798,25 @@ describe('noaaMarineGetCurrents', () => {
       });
       const structured = result.structuredContent as Record<string, unknown>;
 
-      expect(structured.predictions).toHaveLength(120);
+      expect(structured.predictions).toHaveLength(50);
       expect(structured).not.toHaveProperty('truncated');
       expect(structured).not.toHaveProperty('rows_matched');
       expect(structured).not.toHaveProperty('next_offset');
+      expect(structured).not.toHaveProperty('notice');
+    });
+
+    it('pages a 6-minute range of 51 rows, leaving one row at offset 50', async () => {
+      await mockCurrents({ predictions: sixMin(51), stationName: 'Admiralty Inlet' });
+      const result = await runToolContract(noaaMarineGetCurrents, {
+        begin_date: '20250115',
+        end_date: '20250115',
+        interval: '6min',
+        station_id: 'ACT1616',
+      });
+      const structured = result.structuredContent as Record<string, unknown>;
+
+      expect(structured.predictions).toHaveLength(50);
+      expect(structured).toMatchObject({ next_offset: 50, rows_matched: 51, truncated: true });
     });
 
     it('bounds a long 6-minute range and renders exactly the page, with no head slice', async () => {
@@ -815,8 +837,7 @@ describe('noaaMarineGetCurrents', () => {
 
       expect(structured.rows_matched).toBe(720);
       expect(structured.truncated).toBe(true);
-      expect(structured.predictions.length).toBeLessThan(720);
-      expect(JSON.stringify(structured.predictions).length).toBeLessThanOrEqual(24_000);
+      expect(structured.predictions).toHaveLength(50);
       for (const p of structured.predictions) expect(text).toContain(p.time);
       expect(text).not.toContain('more');
       expect(text).toContain('offset');
@@ -870,6 +891,8 @@ describe('noaaMarineGetCurrents', () => {
         begin_date: '20250115',
         end_date: '20250117',
         interval: '6min',
+        // The fixture's first ebb is row 63, so the page has to reach past it.
+        limit: 100,
         station_id: 'ACT1616',
       });
       const structured = result.structuredContent as {
@@ -897,6 +920,85 @@ describe('noaaMarineGetCurrents', () => {
 
       expect(structured.predictions).toHaveLength(6);
       expect(structured.next_offset).toBe(6);
+    });
+
+    it('clamps limit 1001 on the 6-minute curve to 1,000 rows, the clamp leading the page notice', async () => {
+      await mockCurrents({ predictions: sixMin(1200), stationName: 'Admiralty Inlet' });
+      const result = await runToolContract(noaaMarineGetCurrents, {
+        begin_date: '20250115',
+        end_date: '20250119',
+        interval: '6min',
+        limit: 1001,
+        station_id: 'ACT1616',
+      });
+      const structured = result.structuredContent as Record<string, unknown>;
+      const text = result.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
+
+      expect(structured.predictions).toHaveLength(1000);
+      expect(structured).toMatchObject({ next_offset: 1000, rows_matched: 1200 });
+      const notice =
+        'Requested limit 1001; applied limit 1000, the per-call cap. This page carries predictions 1–1000 of 1200. Call again with offset=1000 for the next page.';
+      expect(structured.notice).toBe(notice);
+      expect(text).toContain(notice);
+    });
+
+    it('names a clamp on a MAX_SLACK range that fits the capped page whole', async () => {
+      await mockCurrents({ events: FULL_DAY_EVENTS, stationName: 'Admiralty Inlet' });
+      const result = await runToolContract(noaaMarineGetCurrents, {
+        begin_date: '20250115',
+        end_date: '20250115',
+        limit: 1001,
+        station_id: 'ACT1616',
+      });
+      const structured = result.structuredContent as Record<string, unknown>;
+
+      expect(structured.events).toHaveLength(8);
+      expect(structured).not.toHaveProperty('next_offset');
+      expect(structured.notice).toBe('Requested limit 1001; applied limit 1000, the per-call cap.');
+    });
+
+    it('puts the clamp ahead of a CO-OPS statement in the one notice', async () => {
+      await mockCurrents({
+        events: [],
+        statement: 'Currents are weak and variable',
+        stationName: 'Bainbridge Island',
+      });
+      const result = await runToolContract(noaaMarineGetCurrents, {
+        begin_date: '20250115',
+        end_date: '20250115',
+        limit: 2000,
+        station_id: 'PUG1506',
+      });
+      const structured = result.structuredContent as Record<string, unknown>;
+
+      expect(structured.events).toEqual([]);
+      expect(structured.notice).toBe(
+        'Requested limit 2000; applied limit 1000, the per-call cap. CO-OPS returned a statement instead of current predictions for station PUG1506: "Currents are weak and variable".',
+      );
+    });
+
+    it('describes paging by count, with no response-size budget anywhere on the surface', () => {
+      const surface = JSON.stringify([
+        noaaMarineGetCurrents.description,
+        z.toJSONSchema(noaaMarineGetCurrents.input, { io: 'input' }),
+        z.toJSONSchema(noaaMarineGetCurrents.output),
+        z.toJSONSchema(z.object(noaaMarineGetCurrents.enrichment ?? {})),
+      ]);
+
+      expect(surface).not.toMatch(/budget|response size|fits? one response|largest page|byte/i);
+    });
+
+    it('advertises limit with its default and no maximum, and offset with no maximum', () => {
+      const schema = z.toJSONSchema(noaaMarineGetCurrents.input, { io: 'input' }) as {
+        properties: Record<string, Record<string, unknown>>;
+      };
+      expect(schema.properties.limit).toMatchObject({ default: 50, minimum: 1, multipleOf: 1 });
+      expect(schema.properties.limit).not.toHaveProperty('maximum');
+      expect(schema.properties.limit!.description).toContain(
+        'Default 50; a larger value returns at most 1,000 and says so.',
+      );
+      expect(schema.properties.offset).toMatchObject({ default: 0, minimum: 0, multipleOf: 1 });
+      expect(schema.properties.offset).not.toHaveProperty('maximum');
     });
   });
 
