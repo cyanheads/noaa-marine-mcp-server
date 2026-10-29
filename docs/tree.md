@@ -1,6 +1,6 @@
 # noaa-marine-mcp-server - Directory Structure
 
-Generated on: 2026-10-28 12:36:17
+Generated on: 2026-10-29 16:47:53
 
 ```text
 noaa-marine-mcp-server/
@@ -155,15 +155,16 @@ noaa-marine-mcp-server/
 │   │   │   └── definitions/
 │   │   │       └── noaa-marine-station.resource.ts
 │   │   └── tools/
-│   │       └── definitions/
-│   │           ├── noaa-marine-find-stations.tool.ts
-│   │           ├── noaa-marine-get-conditions.tool.ts
-│   │           ├── noaa-marine-get-current-profile.tool.ts
-│   │           ├── noaa-marine-get-currents.tool.ts
-│   │           ├── noaa-marine-get-monthly-means.tool.ts
-│   │           ├── noaa-marine-get-ocean-observations.tool.ts
-│   │           ├── noaa-marine-get-tide-predictions.tool.ts
-│   │           └── noaa-marine-get-water-level.tool.ts
+│   │       ├── definitions/
+│   │       │   ├── noaa-marine-find-stations.tool.ts
+│   │       │   ├── noaa-marine-get-conditions.tool.ts
+│   │       │   ├── noaa-marine-get-current-profile.tool.ts
+│   │       │   ├── noaa-marine-get-currents.tool.ts
+│   │       │   ├── noaa-marine-get-monthly-means.tool.ts
+│   │       │   ├── noaa-marine-get-ocean-observations.tool.ts
+│   │       │   ├── noaa-marine-get-tide-predictions.tool.ts
+│   │       │   └── noaa-marine-get-water-level.tool.ts
+│   │       └── limit-clamp.ts
 │   ├── services/
 │   │   ├── coops/
 │   │   │   ├── coops-service.ts
@@ -184,6 +185,7 @@ noaa-marine-mcp-server/
 │   │   └── tools/
 │   │       ├── coops-date-forms.test.ts
 │   │       ├── coops-throttle.test.ts
+│   │       ├── limit-clamp.test.ts
 │   │       ├── markdown-contract.test.ts
 │   │       ├── noaa-marine-find-stations.tool.test.ts
 │   │       ├── noaa-marine-get-conditions.tool.test.ts

@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.7.1](changelog/0.7.x/0.7.1.md) — 2026-10-29
+
+Series tools and noaa_marine_find_stations page by row count with a clamped limit, a station with no water-level gauge fails as no_gauge, noaa_marine_get_water_level refuses a future window locally, and noaa_marine_get_conditions reads a CO-OPS station ID through its NDBC relay.
+
 ## [0.7.0](changelog/0.7.x/0.7.0.md) — 2026-10-28
 
 Publishes the noaa-marine-guide skill over MCP, fixes the per-request HTTP memory retention that framework 0.13.16 introduced, and moves to framework 0.13.18.
