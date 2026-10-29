@@ -3,11 +3,11 @@
  * @module mcp-server/tools/definitions/noaa-marine-get-conditions.tool
  */
 
-import { tool, z } from '@cyanheads/mcp-ts-core';
+import { type Context, tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
-import { getNdbcService } from '@/services/ndbc/ndbc-service.js';
-import type { NdbcColumnGroup } from '@/services/ndbc/types.js';
+import { getNdbcService, type NdbcService } from '@/services/ndbc/ndbc-service.js';
+import type { NdbcColumnGroup, NdbcObservation } from '@/services/ndbc/types.js';
 
 /**
  * The output fields each resolved column block fills. The stale-reading notice names these
@@ -22,9 +22,35 @@ const GROUP_FIELDS: Record<NdbcColumnGroup, string> = {
   wind: 'wind_direction_deg, wind_speed_ms, gust_speed_ms',
 };
 
+/** A realtime read the handler branches on: an observation, no file, or a file with every sensor MM. */
+type ObservationRead =
+  | { kind: 'read'; obs: NdbcObservation }
+  | { kind: 'missing' }
+  | { kind: 'no_sensor_data' };
+
+/**
+ * Read a station's realtime file. Both NotFound outcomes come back as results rather than throws:
+ * fetchWithTimeout's bare 404 (no file) is `missing`, and the service's notFound() for a file whose
+ * every sensor is MM carries data.reason `no_sensor_data` — telling them apart keeps a sensorless
+ * buoy from being reported as an invalid ID. Every other failure propagates.
+ */
+async function readObservation(
+  svc: NdbcService,
+  stationId: string,
+  ctx: Context,
+): Promise<ObservationRead> {
+  try {
+    return { kind: 'read', obs: await svc.fetchObservation(stationId, ctx) };
+  } catch (err) {
+    if (!(err instanceof McpError) || err.code !== JsonRpcErrorCode.NotFound) throw err;
+    const reason = (err.data as Record<string, unknown> | undefined)?.reason;
+    return reason === 'no_sensor_data' ? { kind: 'no_sensor_data' } : { kind: 'missing' };
+  }
+}
+
 export const noaaMarineGetConditions = tool('noaa_marine_get_conditions', {
   title: 'Get Marine Conditions',
-  description: `Live marine conditions from an NDBC buoy: wave height, period and direction, wind speed, gust and direction, sea-surface temperature, air temperature, barometric pressure, and dew point. All values are SI units — wind in m/s, wave height in m, pressure in hPa, temperatures in °C — except TIDE, which is in feet, and VIS, in nautical miles, both rarely populated at offshore buoys; a numeric field is null when the buoy sensor did not report a value, which is normal offshore. Row cadence varies by station from 5 to 60 minutes, so observed_at can be that old, and NDBC writes each block of columns on its own cycle, so any block can resolve from an earlier row within 90 minutes of observed_at. Waves carry their own waves_observed_at, null when no wave sample falls inside that window, and any other block read from an earlier row is named with its measurement time in the response notice. Use noaa_marine_find_stations with source="ndbc" and types=["met"] to find station IDs near a location, since met-flagged stations are the ones most likely to serve live conditions: roughly a third of active NDBC stations report neither meteorological nor current data, most of those have no observation file, and omitting the types filter surfaces station IDs this tool cannot read.`,
+  description: `Live marine conditions from an NDBC buoy: wave height, period and direction, wind speed, gust and direction, sea-surface temperature, air temperature, barometric pressure, and dew point. All values are SI units — wind in m/s, wave height in m, pressure in hPa, temperatures in °C — except TIDE, which is in feet, and VIS, in nautical miles, both rarely populated at offshore buoys; a numeric field is null when the buoy sensor did not report a value, which is normal offshore. Row cadence varies by station from 5 to 60 minutes, so observed_at can be that old, and NDBC writes each block of columns on its own cycle, so any block can resolve from an earlier row within 90 minutes of observed_at. Waves carry their own waves_observed_at, null when no wave sample falls inside that window, and any other block read from an earlier row is named with its measurement time in the response notice. Use noaa_marine_find_stations with source="ndbc" and types=["met"] to find station IDs near a location, since met-flagged stations are the ones most likely to serve live conditions: roughly a third of active NDBC stations report neither meteorological nor current data, most of those have no observation file, and omitting the types filter surfaces station IDs this tool cannot read. A 7-digit CO-OPS station ID also works when NDBC relays that gauge's met sensors under a station of its own: the response reads the relay, returns its ID as station_id with its name and coordinates, and returns the requested ID as coops_station_id; a gauge NDBC does not relay fails buoy_not_found.`,
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   input: z.object({
@@ -32,12 +58,22 @@ export const noaaMarineGetConditions = tool('noaa_marine_get_conditions', {
       .string()
       .regex(/^[A-Za-z0-9_-]{1,20}$/)
       .describe(
-        'NDBC buoy station ID (5-character alphanumeric, e.g. "46041" for Cape Elizabeth). Obtain from noaa_marine_find_stations with source="ndbc" and types=["met"].',
+        'NDBC station ID (e.g. "46041" for Cape Elizabeth). Obtain from noaa_marine_find_stations with source="ndbc" and types=["met"]. A 7-digit CO-OPS station ID (e.g. "8654467") also works when NDBC relays that gauge\'s met sensors under a station ID of its own.',
       ),
   }),
 
   output: z.object({
-    station_id: z.string().describe('Station ID echoed from the request — for chaining.'),
+    station_id: z
+      .string()
+      .describe(
+        "ID of the NDBC station these observations come from: the requested ID, uppercased, or — when a CO-OPS station ID was requested — the NDBC station that relays that gauge's met sensors.",
+      ),
+    coops_station_id: z
+      .string()
+      .optional()
+      .describe(
+        'The CO-OPS station ID that was requested, present only when it was read through the NDBC relay in station_id. Use it with the CO-OPS tools (tides, water level, currents); use station_id for NDBC reads. Absent when station_id is the ID requested.',
+      ),
     station_name: z.string().describe('Station name from the NDBC active stations list.'),
     latitude: z
       .number()
@@ -117,7 +153,7 @@ export const noaaMarineGetConditions = tool('noaa_marine_get_conditions', {
       .string()
       .optional()
       .describe(
-        'Present when a sensor block other than waves was read from a row older than observed_at, naming each such block, the output fields it fills, and the time those values were measured. Absent when every block outside the wave columns came from the newest row.',
+        'Present when a CO-OPS station ID was read through its NDBC relay (naming both IDs), when a sensor block other than waves was read from a row older than observed_at (naming each such block, the output fields it fills, and the time those values were measured), or both, in one string. Absent for a station read under its own ID whose blocks outside the wave columns all came from the newest row.',
       ),
   },
 
@@ -125,14 +161,14 @@ export const noaaMarineGetConditions = tool('noaa_marine_get_conditions', {
     {
       reason: 'buoy_not_found',
       code: JsonRpcErrorCode.NotFound,
-      when: 'NDBC returned 404 for the station ID.',
+      when: 'NDBC has no observation file for the station ID and no NDBC station relays it as a CO-OPS gauge; the NDBC station relaying the CO-OPS ID has no observation file either; or several NDBC stations relay it and the met flag does not single one out.',
       recovery:
-        'Find a conditions-capable station with noaa_marine_find_stations using source="ndbc" and types=["met"] — an unfiltered NDBC search returns stations that have no observation file.',
+        'Find a conditions-capable station with noaa_marine_find_stations using source="ndbc" and types=["met"] — an unfiltered NDBC search returns stations that have no observation file, and a CO-OPS gauge NDBC does not relay has no conditions here.',
     },
     {
       reason: 'no_sensor_data',
       code: JsonRpcErrorCode.NotFound,
-      when: 'Buoy file exists but all sensor fields are MM (missing) — buoy offline or sensor failure.',
+      when: 'Buoy file exists but all sensor fields are MM (missing) — buoy offline or sensor failure. Also raised for the NDBC relay of a CO-OPS station ID, naming both IDs.',
       recovery:
         'This station may be temporarily offline — try a nearby one from noaa_marine_find_stations with source="ndbc" and types=["met"].',
     },
@@ -140,36 +176,68 @@ export const noaaMarineGetConditions = tool('noaa_marine_get_conditions', {
 
   async handler(input, ctx) {
     const ndbcSvc = getNdbcService();
+    const requestedId = input.station_id.toUpperCase();
 
     // Get station metadata for name/coordinates
     const stations = await ndbcSvc.getActiveStations(ctx);
-    const meta = stations.find((s) => s.id.toUpperCase() === input.station_id.toUpperCase());
+    let station = stations.find((s) => s.id.toUpperCase() === requestedId);
+    let stationId = requestedId;
+    let coopsStationId: string | undefined;
 
-    let obs: Awaited<ReturnType<typeof ndbcSvc.fetchObservation>>;
-    try {
-      obs = await ndbcSvc.fetchObservation(input.station_id, ctx);
-    } catch (err) {
-      // Both a genuine missing buoy and an offline/sensor-failure buoy surface as
-      // code NotFound: fetchWithTimeout throws a bare 404 (data.status: 404, no
-      // reason) before the service's own check runs, while the service's notFound()
-      // for an existing-but-empty file carries data.reason: 'no_sensor_data'. Inspect
-      // the reason so a sensorless buoy isn't mislabeled as an invalid station ID.
-      if (err instanceof McpError && err.code === JsonRpcErrorCode.NotFound) {
-        const reason = (err.data as Record<string, unknown> | undefined)?.reason;
-        if (reason === 'no_sensor_data') {
-          throw ctx.fail(
-            'no_sensor_data',
-            `NDBC buoy ${input.station_id} reported no usable sensor data — the buoy file exists but every sensor value is missing (buoy offline or sensor failure).`,
-          );
-        }
+    let read = await readObservation(ndbcSvc, input.station_id, ctx);
+    if (read.kind === 'no_sensor_data') {
+      throw ctx.fail(
+        'no_sensor_data',
+        `NDBC buoy ${input.station_id} reported no usable sensor data — the buoy file exists but every sensor value is missing (buoy offline or sensor failure).`,
+      );
+    }
+
+    if (read.kind === 'missing') {
+      // NDBC relays the met sensors of many CO-OPS gauges under a station ID of its own, named
+      // after the gauge's number. Only a miss looks for one, so a hit costs no extra request.
+      const relays = ndbcSvc.findCoopsRelays(requestedId, stations);
+      if (relays.length === 0) {
         throw ctx.fail(
           'buoy_not_found',
           `NDBC has no observation file for station ${input.station_id} — use noaa_marine_find_stations with source="ndbc" and types=["met"] to find a conditions-capable station.`,
         );
       }
-      throw err;
-    }
+      const metRelays = relays.filter((s) => s.hasMet);
+      const relay =
+        relays.length === 1 ? relays[0] : metRelays.length === 1 ? metRelays[0] : undefined;
+      if (!relay) {
+        throw ctx.fail(
+          'buoy_not_found',
+          `CO-OPS station ${requestedId} is relayed by more than one NDBC station (${relays.map((s) => s.id).join(', ')}) and the met flag does not single one out — call this tool with one of those station IDs.`,
+        );
+      }
 
+      read = await readObservation(ndbcSvc, relay.id, ctx);
+      if (read.kind === 'missing') {
+        throw ctx.fail(
+          'buoy_not_found',
+          `NDBC has no observation file for station ${relay.id}, the NDBC relay of CO-OPS station ${requestedId} — use noaa_marine_find_stations with source="ndbc" and types=["met"] to find a conditions-capable station.`,
+        );
+      }
+      if (read.kind === 'no_sensor_data') {
+        throw ctx.fail(
+          'no_sensor_data',
+          `NDBC buoy ${relay.id}, the NDBC relay of CO-OPS station ${requestedId}, reported no usable sensor data — the buoy file exists but every sensor value is missing (buoy offline or sensor failure).`,
+        );
+      }
+      station = relay;
+      stationId = relay.id;
+      coopsStationId = requestedId;
+    }
+    const { obs } = read;
+
+    // `notice` is one field, and each write replaces the last, so every sentence joins into one.
+    const notices: string[] = [];
+    if (coopsStationId !== undefined) {
+      notices.push(
+        `CO-OPS station ${coopsStationId} read through its NDBC relay ${escapeMarkdownInline(stationId)}.`,
+      );
+    }
     // A block resolved from an earlier row was measured before observed_at. The wave block
     // reports its own age on `output` as waves_observed_at, so only the blocks whose age no
     // output field carries need saying here — that keeps the rule "disclose an age the payload
@@ -179,24 +247,27 @@ export const noaaMarineGetConditions = tool('noaa_marine_get_conditions', {
       const measured = undisclosed
         .map((g) => `${GROUP_FIELDS[g.group]} at ${g.observedAt}`)
         .join('; ');
-      ctx.enrich.notice(
+      notices.push(
         `Measured before observed_at (${obs.observedAt}) — ${measured}. NDBC writes each block of columns on its own cycle, so a block is read from the most recent row within 90 minutes that carried it.`,
       );
     }
+    if (notices.length > 0) ctx.enrich.notice(notices.join(' '));
 
     ctx.log.info('NDBC conditions fetched', {
-      station_id: input.station_id,
+      station_id: stationId,
+      coops_station_id: coopsStationId,
       observed_at: obs.observedAt,
       stale_groups: obs.staleGroups.map((g) => g.group),
     });
 
     return {
-      station_id: input.station_id.toUpperCase(),
-      station_name: meta?.name ?? input.station_id,
+      station_id: stationId,
+      ...(coopsStationId !== undefined && { coops_station_id: coopsStationId }),
+      station_name: station?.name ?? input.station_id,
       // A station ID is an honest label for a station; a coordinate pair is not — a station
       // with no catalog entry has unknown coordinates, not a position in the Gulf of Guinea.
-      latitude: meta?.lat ?? null,
-      longitude: meta?.lon ?? null,
+      latitude: station?.lat ?? null,
+      longitude: station?.lon ?? null,
       observed_at: obs.observedAt,
       source: 'ndbc',
       wind_direction_deg: obs.windDirectionDeg,
@@ -223,6 +294,13 @@ export const noaaMarineGetConditions = tool('noaa_marine_get_conditions', {
       `## Marine Conditions — ${escapeMarkdownInline(result.station_name)} (${escapeMarkdownInline(result.station_id)})`,
       `**Observed at:** ${result.observed_at} · **Source:** ${result.source}`,
       `**Location:** ${result.latitude ?? 'unknown'}, ${result.longitude ?? 'unknown'}`,
+    ];
+    if (result.coops_station_id !== undefined) {
+      lines.push(
+        `**CO-OPS station:** ${escapeMarkdownInline(result.coops_station_id)} (met sensors relayed by NDBC station ${escapeMarkdownInline(result.station_id)})`,
+      );
+    }
+    lines.push(
       '',
       '### Wind',
       `Direction: ${fmt(result.wind_direction_deg, '°T')} · Speed: ${fmt(result.wind_speed_ms, 'm/s')} · Gust: ${fmt(result.gust_speed_ms, 'm/s')}`,
@@ -237,7 +315,7 @@ export const noaaMarineGetConditions = tool('noaa_marine_get_conditions', {
       '',
       '### Water',
       `Sea surface temp: ${fmt(result.water_temp_c, '°C')}`,
-    ];
+    );
 
     if (result.visibility_nmi !== null) {
       lines.push(`Visibility: ${result.visibility_nmi} nmi`);

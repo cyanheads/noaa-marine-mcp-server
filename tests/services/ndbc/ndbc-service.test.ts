@@ -554,6 +554,91 @@ describe('NdbcService.parseActiveStationsXml', () => {
   });
 });
 
+// --- #46: NDBC names each relay of a CO-OPS gauge's met sensors after the gauge's ID ---
+
+describe('NdbcService.findCoopsRelays', () => {
+  let svc: NdbcService;
+
+  beforeEach(() => {
+    svc = makeService();
+  });
+
+  /** Live activestations.xml rows (2026-10-29), parsed through the production XML parser. */
+  const CATALOG = `<stations>
+<station id="46041" lat="47.351" lon="-124.741" elev="0" name="CAPE ELIZABETH - 45NM NW of Aberdeen, WA" owner="NDBC" pgm="NDBC Meteorological/Ocean" type="buoy" met="y" currents="n" waterquality="n" dart="n"/>
+<station id="cfwm1" lat="44.657" lon="-67.205" elev="3.8" name=" 8411060 - Cutler Farris Wharf, ME" owner="NOS" pgm="NOS/CO-OPS" type="fixed" met="y" currents="n" waterquality="n" dart="n"/>
+<station id="hcgn7" lat="35.209" lon="-75.704" elev="1.9" name="8654467 - USCG Station Hatteras, NC" owner="NOS" pgm="NOS/CO-OPS" type="fixed" met="y" currents="n" waterquality="n" dart="n"/>
+<station id="nlhc3" lat="41.372" lon="-72.096" elev="2.4" name="8461490 - New London, CT" owner="NOS" pgm="NOS/CO-OPS" type="fixed" met="y" currents="n" waterquality="n" dart="n"/>
+<station id="nlnc3" lat="41.361" lon="-72.09" elev="2.4" name="8461490 - New London, CT" owner="NOS" pgm="NOS/CO-OPS" type="fixed" met="n" currents="n" waterquality="n" dart="n"/>
+<station id="tshf1" lat="27.929" lon="-82.426" elev="2.1" name="8726679  - East Bay Causeway, FL" owner="NOAA NOS PORTS" pgm="NOS/CO-OPS" type="fixed" met="n" currents="n" waterquality="n" dart="n"/>
+<station id="attu1" lat="52.8" lon="173.2" elev="2" name="ATTU - Attu Island, AK" owner="NOS" type="fixed" met="y" currents="n" waterquality="n" dart="n"/>
+</stations>`;
+
+  function catalog(): NdbcStation[] {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return (svc as any).parseActiveStationsXml(CATALOG) as NdbcStation[];
+  }
+
+  const ids = (stations: NdbcStation[]) => stations.map((s) => s.id);
+
+  it('finds the relay whose name opens with the CO-OPS ID, a space, and a dash', () => {
+    expect(ids(svc.findCoopsRelays('8654467', catalog()))).toEqual(['HCGN7']);
+  });
+
+  it('matches a run of spaces before the dash (TSHF1)', () => {
+    expect(ids(svc.findCoopsRelays('8726679', catalog()))).toEqual(['TSHF1']);
+  });
+
+  it('matches a name the catalog wrote with a leading space (CFWM1)', () => {
+    expect(ids(svc.findCoopsRelays('8411060', catalog()))).toEqual(['CFWM1']);
+  });
+
+  it('returns every relay of a gauge NDBC lists twice, met-flagged or not', () => {
+    expect(ids(svc.findCoopsRelays('8461490', catalog()))).toEqual(['NLHC3', 'NLNC3']);
+  });
+
+  it('returns nothing for an ID no station name opens with', () => {
+    expect(svc.findCoopsRelays('9999991', catalog())).toEqual([]);
+    // A shorter ID never matches the head of a longer number.
+    expect(svc.findCoopsRelays('865446', catalog())).toEqual([]);
+  });
+
+  it('matches only 7-digit CO-OPS IDs, never another name prefix', () => {
+    // `ATTU - …` is a name prefix NDBC uses, but not a CO-OPS station number.
+    expect(svc.findCoopsRelays('ATTU', catalog())).toEqual([]);
+    expect(svc.findCoopsRelays('46041', catalog())).toEqual([]);
+  });
+
+  it('requires the dash after the whitespace', () => {
+    const stations = [
+      { ...catalog()[2]!, id: 'NODSH', name: '8654467 USCG Station Hatteras, NC' },
+      { ...catalog()[2]!, id: 'GLUED', name: '8654467- USCG Station Hatteras, NC' },
+      { ...catalog()[2]!, id: 'LONGR', name: '86544670 - Longer number' },
+    ];
+    expect(svc.findCoopsRelays('8654467', stations)).toEqual([]);
+  });
+
+  it('scans adversarial names in bounded CPU time (anchored pattern)', () => {
+    // Station names are upstream text. The pattern is anchored, so each name costs at most one
+    // linear pass — the worst shape is seven digits, then a long whitespace run with no dash.
+    const n = 320_000;
+    const stations = [
+      `8654467${' '.repeat(n)}x`,
+      `8654467${'  \r\n'.repeat(n / 4)}y`,
+      '8'.repeat(n),
+      `${'x'.repeat(n)}\ny`,
+    ].map((name, i) => ({ ...catalog()[2]!, id: `ADV${i}`, name }));
+
+    const before = process.threadCpuUsage();
+    const matches = svc.findCoopsRelays('8654467', stations);
+    const used = process.threadCpuUsage(before);
+
+    expect(matches).toEqual([]);
+    // Measured ≈1 ms (Node) / ≈0.3 ms (Bun) for this set; linear through 640k.
+    expect((used.user + used.system) / 1000).toBeLessThan(50);
+  });
+});
+
 describe('NdbcService.parseAdcpText', () => {
   let svc: NdbcService;
 

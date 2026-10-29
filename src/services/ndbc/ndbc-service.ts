@@ -26,6 +26,13 @@ const OCEAN_URL = (id: string) =>
   `https://www.ndbc.noaa.gov/data/realtime2/${id.toUpperCase()}.ocean`;
 const CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
 
+/**
+ * The name NDBC gives a station that relays a CO-OPS gauge's met sensors: the gauge's 7-digit
+ * CO-OPS ID, whitespace, then `- ` and the gauge name (`8654467 - USCG Station Hatteras, NC`;
+ * TSHF1 writes two spaces before the dash). Anchored, so a name costs one linear pass at most.
+ */
+const COOPS_RELAY_NAME_REGEX = /^(\d{7})\s+- /;
+
 interface StationCache {
   fetchedAt: number;
   stations: NdbcStation[];
@@ -196,6 +203,15 @@ export class NdbcService {
     this.stationCache = { stations, fetchedAt: Date.now() };
     ctx.log.debug('NDBC active stations cached', { count: stations.length });
     return stations;
+  }
+
+  /**
+   * The stations in `stations` that NDBC names as relays of CO-OPS gauge `coopsId` — usually
+   * one, occasionally a met-flagged and an unflagged station for the same gauge. Empty for an
+   * ID that is not a 7-digit CO-OPS number. Reads the list it is given; no request.
+   */
+  findCoopsRelays(coopsId: string, stations: NdbcStation[]): NdbcStation[] {
+    return stations.filter((s) => COOPS_RELAY_NAME_REGEX.exec(s.name)?.[1] === coopsId);
   }
 
   /** Pre-warm the active station cache. Called during server setup. */

@@ -5,7 +5,7 @@
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { noaaMarineGetConditions } from '@/mcp-server/tools/definitions/noaa-marine-get-conditions.tool.js';
 import { initNdbcService } from '@/services/ndbc/ndbc-service.js';
 
@@ -540,5 +540,252 @@ describe('noaaMarineGetConditions', () => {
     expect(noaaMarineGetConditions.description).not.toMatch(/every 10 minutes/);
     expect(noaaMarineGetConditions.description).not.toMatch(/10–20 minutes old/);
     expect(noaaMarineGetConditions.description).toContain('waves_observed_at');
+  });
+
+  // --- #46: a CO-OPS station ID reads the NDBC station that relays that gauge's met sensors ---
+
+  describe('CO-OPS ID resolution (fetch-level: real service, parser, and status mapping)', () => {
+    const CATALOG_URL = 'https://www.ndbc.noaa.gov/activestations.xml';
+    const realtimeUrl = (id: string) => `https://www.ndbc.noaa.gov/data/realtime2/${id}.txt`;
+
+    /** Live activestations.xml rows (2026-10-29). DUP1/DUP2 are a synthetic two-met-relay gauge. */
+    const CATALOG = `<?xml version="1.0" encoding="utf-8"?><stations created="2026-10-29T15:50:03UTC" count="7">
+<station id="46041" lat="47.351" lon="-124.741" elev="0" name="CAPE ELIZABETH - 45NM NW of Aberdeen, WA" owner="NDBC" pgm="NDBC Meteorological/Ocean" type="buoy" met="y" currents="n" waterquality="n" dart="n"/>
+<station id="hcgn7" lat="35.209" lon="-75.704" elev="1.9" name="8654467 - USCG Station Hatteras, NC" owner="NOS" pgm="NOS/CO-OPS" type="fixed" met="y" currents="n" waterquality="n" dart="n"/>
+<station id="nlhc3" lat="41.372" lon="-72.096" elev="2.4" name="8461490 - New London, CT" owner="NOS" pgm="NOS/CO-OPS" type="fixed" met="y" currents="n" waterquality="n" dart="n"/>
+<station id="nlnc3" lat="41.361" lon="-72.09" elev="2.4" name="8461490 - New London, CT" owner="NOS" pgm="NOS/CO-OPS" type="fixed" met="n" currents="n" waterquality="n" dart="n"/>
+<station id="tshf1" lat="27.929" lon="-82.426" elev="2.1" name="8726679  - East Bay Causeway, FL" owner="NOAA NOS PORTS" pgm="NOS/CO-OPS" type="fixed" met="n" currents="n" waterquality="n" dart="n"/>
+<station id="anta2" lat="61.238" lon="-149.89" elev="7.4" name="9455920 - Anchorage, AK" owner="NOS" pgm="NOS/CO-OPS" type="fixed" met="n" currents="n" waterquality="n" dart="n"/>
+<station id="dup1" lat="40.0" lon="-70.0" elev="1" name="1234567 - Twin Gauge" owner="NOS" type="fixed" met="y" currents="n" waterquality="n" dart="n"/>
+<station id="dup2" lat="40.1" lon="-70.1" elev="1" name="1234567 - Twin Gauge" owner="NOS" type="fixed" met="y" currents="n" waterquality="n" dart="n"/>
+</stations>`;
+
+    const RT_HEADER =
+      '#YY  MM DD hh mm WDIR WSPD GST  WVHT   DPD   APD MWD   PRES  ATMP  WTMP  DEWP  VIS PTDY  TIDE\n' +
+      '#yr  mo dy hr mn degT m/s  m/s     m   sec   sec degT   hPa  degC  degC  degC  nmi  hPa    ft\n';
+    /** HCGN7's live shape: a fixed station — wind, pressure, water temp; no wave sensor. */
+    const RELAY_TXT = `${RT_HEADER}2026 10 29 15 18  10  7.2  8.2    MM    MM    MM  MM 1024.3    MM  18.8    MM   MM   MM    MM\n`;
+    /** Newest row carries no wind; the wind block resolves from the row 6 minutes earlier. */
+    const STALE_WIND_TXT = `${RT_HEADER}2026 10 29 15 18  MM   MM   MM    MM    MM    MM  MM 1024.3    MM  18.8    MM   MM   MM    MM\n2026 10 29 15 12  10  7.2  8.2    MM    MM    MM  MM 1024.2    MM  18.8    MM   MM   MM    MM\n`;
+    const ALL_MM_TXT = `${RT_HEADER}2026 10 29 15 18  MM   MM   MM    MM    MM    MM  MM     MM    MM    MM    MM   MM   MM    MM\n`;
+    const BUOY_TXT = `${RT_HEADER}2026 10 29 15 20 270  5.2  7.1   2.1    14   9.0 275 1013.5  12.3  11.0   8.5   MM   MM    MM\n`;
+
+    /**
+     * Route NDBC URLs to canned bodies (a number is an HTTP status). Every request is recorded;
+     * an unrouted URL answers 410 — a non-transient status, so nothing retries — and shows up in
+     * the recorded list the assertions pin.
+     */
+    function routeNdbc(routes: Record<string, string | number>): string[] {
+      const requested: string[] = [];
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (input: string | URL | Request) => {
+          const url = input instanceof Request ? input.url : String(input);
+          requested.push(url);
+          const route = routes[url] ?? 410;
+          return typeof route === 'number'
+            ? new Response('Not Found', { status: route })
+            : new Response(route, { status: 200 });
+        }),
+      );
+      return requested;
+    }
+
+    const textOf = (result: { content: unknown[] }) =>
+      result.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
+
+    /** The error envelope a failed call carries on structuredContent. */
+    const errorOf = (result: { structuredContent?: unknown }) =>
+      (result.structuredContent as { error: { message: string; data: Record<string, unknown> } })
+        .error;
+
+    afterEach(() => {
+      vi.unstubAllGlobals();
+    });
+
+    it('makes the same two requests as before on the hit path, with no resolution fields', async () => {
+      const requested = routeNdbc({ [CATALOG_URL]: CATALOG, [realtimeUrl('46041')]: BUOY_TXT });
+
+      const result = await runToolContract(noaaMarineGetConditions, { station_id: '46041' });
+
+      expect(result.isError).toBeFalsy();
+      expect(requested).toEqual([CATALOG_URL, realtimeUrl('46041')]);
+      const structured = result.structuredContent as Record<string, unknown>;
+      expect(structured.station_id).toBe('46041');
+      expect(structured).not.toHaveProperty('coops_station_id');
+      expect(structured.notice).toBeUndefined();
+      expect(textOf(result)).not.toContain('CO-OPS');
+    });
+
+    it('keeps the unchanged buoy_not_found message when no station name carries the ID', async () => {
+      const requested = routeNdbc({ [CATALOG_URL]: CATALOG, [realtimeUrl('9999991')]: 404 });
+
+      const result = await runToolContract(noaaMarineGetConditions, { station_id: '9999991' });
+
+      expect(result.isError).toBe(true);
+      expect(requested).toEqual([CATALOG_URL, realtimeUrl('9999991')]);
+      const error = errorOf(result);
+      expect(error.data.reason).toBe('buoy_not_found');
+      expect(error.message).toBe(
+        'NDBC has no observation file for station 9999991 — use noaa_marine_find_stations with source="ndbc" and types=["met"] to find a conditions-capable station.',
+      );
+    });
+
+    it('never looks for a relay when the requested ID fails no_sensor_data', async () => {
+      // HCGN7 itself is offline: its file exists, every sensor is MM. That is not a miss.
+      const requested = routeNdbc({ [CATALOG_URL]: CATALOG, [realtimeUrl('HCGN7')]: ALL_MM_TXT });
+
+      const result = await runToolContract(noaaMarineGetConditions, { station_id: 'HCGN7' });
+
+      expect(requested).toEqual([CATALOG_URL, realtimeUrl('HCGN7')]);
+      expect(errorOf(result).data.reason).toBe('no_sensor_data');
+    });
+
+    it('reads a CO-OPS ID through its NDBC relay on both surfaces', async () => {
+      const requested = routeNdbc({
+        [CATALOG_URL]: CATALOG,
+        [realtimeUrl('8654467')]: 404,
+        [realtimeUrl('HCGN7')]: RELAY_TXT,
+      });
+
+      const result = await runToolContract(noaaMarineGetConditions, { station_id: '8654467' });
+
+      expect(result.isError).toBeFalsy();
+      // The miss path adds exactly one request: the relay's file. The catalog is not refetched.
+      expect(requested).toEqual([CATALOG_URL, realtimeUrl('8654467'), realtimeUrl('HCGN7')]);
+
+      const structured = result.structuredContent as Record<string, unknown>;
+      expect(structured).toMatchObject({
+        station_id: 'HCGN7',
+        coops_station_id: '8654467',
+        station_name: '8654467 - USCG Station Hatteras, NC',
+        latitude: 35.209,
+        longitude: -75.704,
+        observed_at: '2026-10-29T15:18:00Z',
+        wind_speed_ms: 7.2,
+        pressure_hpa: 1024.3,
+        water_temp_c: 18.8,
+        wave_height_m: null,
+      });
+      expect(structured.notice).toBe('CO-OPS station 8654467 read through its NDBC relay HCGN7.');
+      expect(noaaMarineGetConditions.output.safeParse(structured).success).toBe(true);
+
+      const text = textOf(result);
+      expect(text).toContain('(HCGN7)');
+      expect(text).toContain('**CO-OPS station:** 8654467');
+      expect(text).toContain('CO-OPS station 8654467 read through its NDBC relay HCGN7.');
+      expect(text).toContain('**Location:** 35.209, -75.704');
+    });
+
+    it('keeps the met-flagged relay when a gauge has two (8461490 → NLHC3, not NLNC3)', async () => {
+      const requested = routeNdbc({
+        [CATALOG_URL]: CATALOG,
+        [realtimeUrl('8461490')]: 404,
+        [realtimeUrl('NLHC3')]: RELAY_TXT,
+      });
+
+      const result = await runToolContract(noaaMarineGetConditions, { station_id: '8461490' });
+
+      expect(result.isError).toBeFalsy();
+      expect(requested).toEqual([CATALOG_URL, realtimeUrl('8461490'), realtimeUrl('NLHC3')]);
+      expect(result.structuredContent).toMatchObject({
+        station_id: 'NLHC3',
+        coops_station_id: '8461490',
+        latitude: 41.372,
+        longitude: -72.096,
+      });
+    });
+
+    it('matches a relay name with a run of spaces before the dash (8726679 → TSHF1)', async () => {
+      routeNdbc({
+        [CATALOG_URL]: CATALOG,
+        [realtimeUrl('8726679')]: 404,
+        [realtimeUrl('TSHF1')]: RELAY_TXT,
+      });
+
+      const result = await runToolContract(noaaMarineGetConditions, { station_id: '8726679' });
+
+      expect(result.isError).toBeFalsy();
+      expect(result.structuredContent).toMatchObject({
+        station_id: 'TSHF1',
+        coops_station_id: '8726679',
+      });
+    });
+
+    it('fails buoy_not_found naming both IDs when the relay has no file', async () => {
+      const requested = routeNdbc({
+        [CATALOG_URL]: CATALOG,
+        [realtimeUrl('9455920')]: 404,
+        [realtimeUrl('ANTA2')]: 404,
+      });
+
+      const result = await runToolContract(noaaMarineGetConditions, { station_id: '9455920' });
+
+      expect(requested).toEqual([CATALOG_URL, realtimeUrl('9455920'), realtimeUrl('ANTA2')]);
+      const error = errorOf(result);
+      expect(error.data.reason).toBe('buoy_not_found');
+      expect(error.message).toContain('9455920');
+      expect(error.message).toContain('ANTA2');
+      expect(error.message).toContain('types=["met"]');
+      expect(textOf(result)).toContain('ANTA2');
+    });
+
+    it('fails no_sensor_data naming both IDs when the relay file is all MM', async () => {
+      routeNdbc({
+        [CATALOG_URL]: CATALOG,
+        [realtimeUrl('8654467')]: 404,
+        [realtimeUrl('HCGN7')]: ALL_MM_TXT,
+      });
+
+      const result = await runToolContract(noaaMarineGetConditions, { station_id: '8654467' });
+
+      const error = errorOf(result);
+      expect(error.data.reason).toBe('no_sensor_data');
+      expect(error.message).toContain('8654467');
+      expect(error.message).toContain('HCGN7');
+    });
+
+    it('fails buoy_not_found naming every match when the met flag leaves more than one', async () => {
+      const requested = routeNdbc({ [CATALOG_URL]: CATALOG, [realtimeUrl('1234567')]: 404 });
+
+      const result = await runToolContract(noaaMarineGetConditions, { station_id: '1234567' });
+
+      // Neither relay is read: guessing between two met relays would be a silent choice.
+      expect(requested).toEqual([CATALOG_URL, realtimeUrl('1234567')]);
+      const error = errorOf(result);
+      expect(error.data.reason).toBe('buoy_not_found');
+      expect(error.message).toContain('DUP1');
+      expect(error.message).toContain('DUP2');
+      expect(error.message).toContain('1234567');
+    });
+
+    it('joins the resolution and stale-block sentences into one notice', async () => {
+      routeNdbc({
+        [CATALOG_URL]: CATALOG,
+        [realtimeUrl('8654467')]: 404,
+        [realtimeUrl('HCGN7')]: STALE_WIND_TXT,
+      });
+
+      const result = await runToolContract(noaaMarineGetConditions, { station_id: '8654467' });
+
+      expect(result.isError).toBeFalsy();
+      const notice = (result.structuredContent as Record<string, unknown>).notice as string;
+      // notice is last-write-wins: one sentence must not replace the other.
+      expect(notice).toContain('CO-OPS station 8654467 read through its NDBC relay HCGN7.');
+      expect(notice).toContain(
+        'wind_direction_deg, wind_speed_ms, gust_speed_ms at 2026-10-29T15:12:00Z',
+      );
+      expect(textOf(result)).toContain('CO-OPS station 8654467 read through its NDBC relay HCGN7.');
+      expect(textOf(result)).toContain('2026-10-29T15:12:00Z');
+    });
+  });
+
+  it('describes station_id as the station read, and names the CO-OPS route, on every surface', () => {
+    const outputStationId = noaaMarineGetConditions.output.shape.station_id.description!;
+    expect(outputStationId).not.toMatch(/echoed from the request/i);
+    expect(noaaMarineGetConditions.input.shape.station_id.description).toMatch(/CO-OPS/);
+    expect(noaaMarineGetConditions.description).toMatch(/CO-OPS/);
+    const notFound = noaaMarineGetConditions.errors!.find((e) => e.reason === 'buoy_not_found')!;
+    expect(notFound.when).toMatch(/CO-OPS/);
   });
 });
