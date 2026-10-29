@@ -11,6 +11,7 @@ import {
   datumRetryHint,
   getCoopsService,
   isCoopsBodyError,
+  noGaugeHint,
 } from '@/services/coops/coops-service.js';
 import {
   awaitsVerification,
@@ -18,7 +19,7 @@ import {
   validateCoopsDateRange,
 } from '@/services/coops/date-range.js';
 import { pageDisclosure, pageNotice, pageRows } from '@/services/coops/row-page.js';
-import type { CoopsMonthlyMeanRow, CoopsStation } from '@/services/coops/types.js';
+import type { CoopsMonthlyMeanRow } from '@/services/coops/types.js';
 
 /** The span CO-OPS names as its `monthly_mean` ceiling, enforced before the call. */
 const MAX_SPAN_DAYS = 73_000;
@@ -53,18 +54,6 @@ const INTERVAL_KEYS: ReadonlySet<MonthValueKey> = new Set(['hwi', 'lwi']);
 /** Months since year 0 — one comparable number per calendar month. */
 function monthIndex(year: number, month: number): number {
   return year * 12 + (month - 1);
-}
-
-/**
- * The recovery for a station CO-OPS recognizes but that has never had a water-level gauge: a
- * gauge nearby, and the predicted tide at the station itself when it is a tide-prediction
- * station. The tide-prediction row carries the coordinates the nearby search needs.
- */
-function noGaugeHint(stationId: string, tideStation: CoopsStation | undefined): string {
-  if (!tideStation) {
-    return `Find a water-level station near it with noaa_marine_find_stations and types=["water_level"].`;
-  }
-  return `Find a water-level station nearby with noaa_marine_find_stations, latitude ${tideStation.lat}, longitude ${tideStation.lng}, and types=["water_level"]. For the predicted tide at station ${stationId}, call noaa_marine_get_tide_predictions with that station_id.`;
 }
 
 const height = (what: string) =>

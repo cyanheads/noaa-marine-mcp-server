@@ -12,6 +12,7 @@ import {
   getCoopsService,
   isCoopsBodyError,
   isCoopsThrottled,
+  noGaugeHint,
 } from '@/services/coops/coops-service.js';
 import {
   awaitsVerification,
@@ -21,7 +22,7 @@ import {
   validateCoopsDateRange,
 } from '@/services/coops/date-range.js';
 import { pageDisclosure, pageNotice, pagePairedRows } from '@/services/coops/row-page.js';
-import type { CoopsPredictionRow, CoopsStation } from '@/services/coops/types.js';
+import type { CoopsPredictionRow } from '@/services/coops/types.js';
 
 /** The observed water-level cadences this tool serves, one CO-OPS product each. */
 type WaterLevelInterval = '6min' | 'hourly' | 'high_low' | 'daily_mean';
@@ -102,18 +103,6 @@ async function waterLevelStationClock(
   const station = await getCoopsService().findStation('waterlevels', stationId, ctx);
   if (typeof station?.timezonecorr !== 'number') return;
   return { utcOffsetHours: station.timezonecorr, observesDst: station.observedst === true };
-}
-
-/**
- * The recovery for a station CO-OPS recognizes but that has never had a water-level gauge: a
- * gauge nearby, and the predicted tide at the station itself when it is a tide-prediction
- * station. The tide-prediction row carries the coordinates the nearby search needs.
- */
-function noGaugeHint(stationId: string, tideStation: CoopsStation | undefined): string {
-  if (!tideStation) {
-    return `Find a water-level station near it with noaa_marine_find_stations and types=["water_level"].`;
-  }
-  return `Find a water-level station nearby with noaa_marine_find_stations, latitude ${tideStation.lat}, longitude ${tideStation.lng}, and types=["water_level"]. For the predicted tide at station ${stationId}, call noaa_marine_get_tide_predictions with that station_id.`;
 }
 
 export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
@@ -408,7 +397,7 @@ export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
     /*
      * A window that starts after the station's current date can hold no observation, and CO-OPS
      * answers it with the same empty sentence it sends an outage or a window before the record —
-     * or, on the coarser products, with the verification-lag one. Refused here, before any
+     * or, on the coarser products, with the verification-lag one. Refused here, before any data
      * request, in the zone CO-OPS reads the dates in: daily_mean is served in LST only.
      */
     const timeZone = spec.product === 'daily_mean' ? 'lst' : input.time_zone;

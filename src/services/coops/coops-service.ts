@@ -313,6 +313,18 @@ export function datumRetryHint(stationId: string, rejected: string, greatLakes: 
   ]);
 }
 
+/**
+ * The recovery for a station CO-OPS recognizes but that has never had a water-level gauge: a
+ * gauge nearby, and the predicted tide at the station itself when it is a tide-prediction
+ * station. The tide-prediction row carries the coordinates the nearby search needs.
+ */
+export function noGaugeHint(stationId: string, tideStation: CoopsStation | undefined): string {
+  if (!tideStation) {
+    return `Find a water-level station near it with noaa_marine_find_stations and types=["water_level"].`;
+  }
+  return `Find a water-level station nearby with noaa_marine_find_stations, latitude ${tideStation.lat}, longitude ${tideStation.lng}, and types=["water_level"]. For the predicted tide at station ${stationId}, call noaa_marine_get_tide_predictions with that station_id.`;
+}
+
 export class CoopsService {
   private readonly applicationId: string;
   private readonly stationCache = new Map<CoopsStationType, CacheEntry>();
