@@ -18,7 +18,7 @@ export const noaaMarineGetOceanObservations = tool('noaa_marine_get_ocean_observ
       .string()
       .regex(/^[A-Za-z0-9_-]{1,20}$/)
       .describe(
-        'NDBC station ID (5-character alphanumeric, e.g. "44033" or "TIBC1"). Obtain from noaa_marine_find_stations with source="ndbc" and types=["water_quality"].',
+        'NDBC station ID (mostly 5-character alphanumeric codes, e.g. "44033" or "TIBC1"; some are 7-digit numbers). Obtain from noaa_marine_find_stations with source="ndbc" and types=["water_quality"].',
       ),
   }),
 
@@ -197,7 +197,7 @@ export const noaaMarineGetOceanObservations = tool('noaa_marine_get_ocean_observ
         '',
         `### Depth ${r.depth_m} m`,
         `Water temp: ${fmt(r.water_temp_c, '°C')} · Conductivity: ${fmt(r.conductivity_ms_cm, 'mS/cm')} · Salinity: ${fmt(r.salinity_psu, 'psu')}`,
-        `Oxygen: ${fmt(r.oxygen_percent, '%')} saturation · ${fmt(r.oxygen_ppm, 'ppm')}`,
+        `Oxygen saturation: ${fmt(r.oxygen_percent, '%')} · Oxygen concentration: ${fmt(r.oxygen_ppm, 'ppm')}`,
         `Chlorophyll: ${fmt(r.chlorophyll_ug_l, 'µg/l')} · Turbidity: ${fmt(r.turbidity_ftu, 'FTU')} · pH: ${r.ph ?? 'not reported'} · Redox: ${fmt(r.redox_mv, 'mV')}`,
       );
     }

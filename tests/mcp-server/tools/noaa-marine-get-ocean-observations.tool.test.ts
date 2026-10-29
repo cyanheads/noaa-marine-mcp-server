@@ -4,7 +4,7 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { noaaMarineGetOceanObservations } from '@/mcp-server/tools/definitions/noaa-marine-get-ocean-observations.tool.js';
 import { initNdbcService } from '@/services/ndbc/ndbc-service.js';
@@ -278,5 +278,34 @@ describe('noaaMarineGetOceanObservations', () => {
     // Null sensors (conductivity, redox) render as "not reported", never null or a fabricated 0.
     expect(text).toContain('not reported');
     expect(text).not.toContain('null');
+  });
+
+  // --- #51: each oxygen value carries its label before it, so a placeholder takes no unit word ---
+
+  it('labels each oxygen value before it on both surfaces, reported or not', async () => {
+    const { getNdbcService } = await import('@/services/ndbc/ndbc-service.js');
+    const svc = getNdbcService();
+    vi.spyOn(svc, 'getActiveStations').mockResolvedValue([NDBC_STATION]);
+    // Depth 0 reports both oxygen values; depth 3 reports neither (live 44063 shape).
+    vi.spyOn(svc, 'fetchOceanObservations').mockResolvedValue(OCEAN_OBS);
+
+    const result = await runToolContract(noaaMarineGetOceanObservations, { station_id: 'TIBC1' });
+
+    expect(result.isError).toBeFalsy();
+    const readings = (result.structuredContent as { readings: Record<string, unknown>[] }).readings;
+    expect(readings[0]).toMatchObject({ oxygen_percent: 65.8, oxygen_ppm: 5.41 });
+    expect(readings[1]).toMatchObject({ oxygen_percent: null, oxygen_ppm: null });
+
+    const text = result.content.map((b) => (b as { text?: string }).text ?? '').join('\n');
+    expect(text).toContain('Oxygen saturation: 65.8 % · Oxygen concentration: 5.41 ppm');
+    expect(text).toContain('Oxygen saturation: not reported · Oxygen concentration: not reported');
+    expect(text).not.toContain('not reported saturation');
+    // The neighbouring lines of the depth block are unchanged.
+    expect(text).toContain(
+      'Water temp: 15.68 °C · Conductivity: not reported · Salinity: 31.24 psu',
+    );
+    expect(text).toContain(
+      'Chlorophyll: 2.3 µg/l · Turbidity: 112 FTU · pH: 7.99 · Redox: not reported',
+    );
   });
 });
