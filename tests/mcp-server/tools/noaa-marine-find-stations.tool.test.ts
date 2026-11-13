@@ -769,6 +769,51 @@ describe('noaaMarineFindStations', () => {
     expect(structured.applied_search).not.toHaveProperty('radius_km');
   });
 
+  it.each([
+    { filters: { types: ['buoy'] }, count: 2, excluded: 'types' },
+    { filters: { types: ['buoy'], source: 'ndbc' }, count: 1, excluded: 'types' },
+    { filters: { state: 'CA' }, count: 1, excluded: 'state' },
+    { filters: { latitude: 25, longitude: -80 }, count: 2, excluded: 'radius_km' },
+  ] satisfies Array<{
+    filters: Partial<z.input<typeof noaaMarineFindStations.input>>;
+    count: number;
+    excluded: string;
+  }>)('names query matches excluded by $excluded', async ({ filters, count, excluded }) => {
+    await mockCatalog(
+      { tidepredictions: [COOPS_SEATTLE_NAMED], waterlevels: [COOPS_SEATTLE_NAMED] },
+      [NDBC_COOPS_MIRROR],
+    );
+    const result = await runToolContract(noaaMarineFindStations, { query: 'seattle', ...filters });
+    expect(result.isError).toBeFalsy();
+    const { notice } = z.object({ notice: z.string() }).parse(result.structuredContent);
+    expect(result.structuredContent).toMatchObject({ total_found: 0 });
+    expect(notice).toContain(`query "seattle" matched ${count} station`);
+    expect(notice).toContain(excluded);
+    expect(notice).not.toContain('shorten the query');
+    expect(notice).not.toContain('matched no station');
+    const text = result.content
+      .map((block) => (block.type === 'text' ? block.text : ''))
+      .join('\n');
+    expect(text).toContain(`matched ${count} station`);
+    expect(text).not.toContain('shorten the query');
+  });
+
+  it('counts query matches only in catalogs that answered', async () => {
+    await mockCatalog({}, [NDBC_COOPS_MIRROR]);
+    vi.spyOn(getCoopsService(), 'getStations').mockRejectedValue(new Error('catalog unavailable'));
+    const result = await runToolContract(noaaMarineFindStations, {
+      query: 'seattle',
+      types: ['buoy'],
+    });
+    expect(result.structuredContent).toMatchObject({
+      sources: { answered: ['ndbc'], failed: ['coops'] },
+    });
+    const { notice } = z.object({ notice: z.string() }).parse(result.structuredContent);
+    expect(notice).toContain('query "seattle" matched 1 station');
+    expect(notice).toContain('results cover ndbc only');
+    expect(notice).not.toContain('shorten the query');
+  });
+
   it('echoes a blank query as omitted rather than as a whitespace search term', async () => {
     await mockCatalog({}, []);
 

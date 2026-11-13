@@ -9,6 +9,7 @@ import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testi
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { noaaMarineGetCurrents } from '@/mcp-server/tools/definitions/noaa-marine-get-currents.tool.js';
 import { CoopsBodyError, initCoopsService } from '@/services/coops/coops-service.js';
+import { callsTo, installCoopsFake } from '../../support/coops-http.js';
 
 /**
  * Live `MAX_SLACK` rows: CO-OPS sends `Velocity_Major` and the mean bearings as JSON
@@ -100,6 +101,223 @@ describe('noaaMarineGetCurrents', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
     setupCoops();
+  });
+
+  it('uses the harmonic bin CO-OPS chooses when bin is omitted', async () => {
+    const http = installCoopsFake((endpoint) =>
+      Response.json(
+        endpoint === 'catalog'
+          ? { stations: [] }
+          : {
+              current_predictions: {
+                cp: [
+                  {
+                    Time: '2026-11-06 00:00',
+                    Velocity_Major: 0.1,
+                    meanFloodDir: 277,
+                    meanEbbDir: 88,
+                    Bin: '2',
+                    Depth: '15',
+                  },
+                ],
+              },
+            },
+      ),
+    );
+    try {
+      const result = await runToolContract(noaaMarineGetCurrents, {
+        station_id: 'ACT8851',
+        begin_date: '20261106',
+        end_date: '20261107',
+        interval: '6min',
+      });
+
+      expect(result.isError).toBeFalsy();
+      expect(callsTo(http, 'data').map((url) => url.searchParams.has('bin'))).toEqual([false]);
+      expect(result.structuredContent).toMatchObject({
+        bin: 2,
+        depth: 15,
+        predictions: [{ time: '2026-11-06 00:00', type: 'flood', speed: 0.1, direction: 277 }],
+      });
+      expect(result.structuredContent).not.toHaveProperty('events');
+      expect(result.structuredContent).not.toHaveProperty('notice');
+      expect(result.content[0]).toMatchObject({
+        text: expect.stringContaining('6-min predictions'),
+      });
+    } finally {
+      http.restore();
+    }
+  });
+
+  describe('CO-OPS current response replay', () => {
+    const input = {
+      station_id: 'ACT8851',
+      begin_date: '20261106',
+      end_date: '20261107',
+      interval: '6min' as const,
+      bin: 1,
+    };
+    const eventRows = [
+      { Type: 'slack', Time: '2026-11-06 00:03', Velocity_Major: 0 },
+      { Type: 'flood', Time: '2026-11-06 01:56', Velocity_Major: 0.43 },
+      { Type: 'slack', Time: '2026-11-06 03:53', Velocity_Major: 0 },
+    ].map((row) => ({ ...row, Bin: '1', Depth: '5', meanFloodDir: 272, meanEbbDir: 91 }));
+    const events = [
+      { time: '2026-11-06 00:03', type: 'slack' },
+      { time: '2026-11-06 01:56', type: 'flood', speed: 0.43, direction: 272 },
+      { time: '2026-11-06 03:53', type: 'slack' },
+    ] as const;
+
+    it.each([
+      { offset: 0, limit: 50, expected: events, next: undefined },
+      { offset: 1, limit: 1, expected: [events[1]], next: 2 },
+      { offset: 2, limit: 1, expected: [events[2]], next: null },
+      { offset: 3, limit: 1, expected: [], next: null },
+    ])(
+      'returns events with a fallback notice at offset $offset',
+      async ({ offset, limit, expected, next }) => {
+        const http = installCoopsFake((endpoint) =>
+          Response.json(
+            endpoint === 'catalog' ? { stations: [] } : { current_predictions: { cp: eventRows } },
+          ),
+        );
+        try {
+          const result = await runToolContract(noaaMarineGetCurrents, { ...input, offset, limit });
+          expect(result.isError).toBeFalsy();
+          expect(result.structuredContent).toMatchObject({
+            bin: 1,
+            depth: 5,
+            events: expected,
+            predictions: [],
+            notice: expect.stringContaining('bin 1 has no 6-minute curve'),
+          });
+          if (next !== undefined) {
+            expect(result.structuredContent).toMatchObject({
+              rows_matched: 3,
+              rows_returned: expected.length,
+              next_offset: next,
+            });
+          } else {
+            expect(result.structuredContent).not.toHaveProperty('rows_matched');
+          }
+          expect(result.content[0]).toMatchObject({
+            text: expect.stringContaining(
+              expected.length ? '**Events**' : '**Events:** none returned.',
+            ),
+          });
+          expect(result.content).toContainEqual(
+            expect.objectContaining({
+              text: expect.stringContaining('bin 1 has no 6-minute curve'),
+            }),
+          );
+          for (const event of expected) {
+            expect(result.content[0]).toMatchObject({
+              text: expect.stringContaining(`${event.time}: ${event.type}`),
+            });
+          }
+          expect(callsTo(http, 'data').map((url) => url.searchParams.get('interval'))).toEqual([
+            '6',
+          ]);
+        } finally {
+          http.restore();
+        }
+      },
+    );
+
+    it.each([
+      {
+        interval: '6min' as const,
+        end_date: '20260201',
+        upstreamInterval: '6',
+      },
+      {
+        interval: 'MAX_SLACK' as const,
+        end_date: '20270101',
+        upstreamInterval: 'MAX_SLACK',
+      },
+    ])(
+      'allows the $interval date span at the limit',
+      async ({ interval, end_date, upstreamInterval }) => {
+        const http = installCoopsFake((endpoint) =>
+          Response.json(
+            endpoint === 'catalog'
+              ? { stations: [] }
+              : { current_predictions: { cp: interval === '6min' ? SIX_MIN_PREDS : eventRows } },
+          ),
+        );
+        try {
+          const result = await runToolContract(noaaMarineGetCurrents, {
+            ...input,
+            begin_date: '20260101',
+            end_date,
+            interval,
+          });
+          expect(result.isError).toBeFalsy();
+          expect(callsTo(http, 'data').map((url) => url.searchParams.get('interval'))).toEqual([
+            upstreamInterval,
+          ]);
+        } finally {
+          http.restore();
+        }
+      },
+    );
+
+    it('rejects a 32-day 6-minute span before making any request', async () => {
+      const http = installCoopsFake(() => Response.json({ stations: [] }));
+      try {
+        const result = await runToolContract(noaaMarineGetCurrents, {
+          ...input,
+          begin_date: '20260101',
+          end_date: '20260202',
+        });
+        expect(http.calls).toHaveLength(0);
+        expect(result.structuredContent).toMatchObject({
+          error: {
+            code: JsonRpcErrorCode.ValidationError,
+            data: { reason: 'date_range_exceeded', max_days: 31 },
+          },
+        });
+        expect(result.content[0]).toMatchObject({ text: expect.stringContaining('31 days') });
+        expect(result.content[0]).toMatchObject({ text: expect.stringContaining('Split') });
+      } finally {
+        http.restore();
+      }
+    });
+
+    it.each([
+      {
+        message:
+          ' Wrong Date: The requested begin/end date or range are not valid.  Range Limit Exceeded: The size limit for data retrieval for this product is 31 days ',
+        code: JsonRpcErrorCode.ValidationError,
+        reason: 'date_range_exceeded',
+        data: { max_days: 31 },
+        hint: 'Split',
+      },
+      {
+        message: ' Wrong Station ID: Please submit a valid station ID ',
+        code: JsonRpcErrorCode.NotFound,
+        reason: 'station_not_found',
+        data: {},
+        hint: 'noaa_marine_find_stations',
+      },
+    ])('classifies a CO-OPS HTTP 400 as $reason', async ({ message, code, reason, data, hint }) => {
+      const http = installCoopsFake((endpoint) =>
+        endpoint === 'catalog'
+          ? Response.json({ stations: [] })
+          : Response.json({ error: { message } }, { status: 400 }),
+      );
+      try {
+        const result = await runToolContract(noaaMarineGetCurrents, input);
+        expect(callsTo(http, 'data')).toHaveLength(1);
+        expect(result.isError).toBe(true);
+        expect(result.structuredContent).toMatchObject({
+          error: { code, data: { ...data, reason } },
+        });
+        expect(result.content[0]).toMatchObject({ text: expect.stringContaining(hint) });
+      } finally {
+        http.restore();
+      }
+    });
   });
 
   it('returns MAX_SLACK events with flood, slack, and ebb types', async () => {

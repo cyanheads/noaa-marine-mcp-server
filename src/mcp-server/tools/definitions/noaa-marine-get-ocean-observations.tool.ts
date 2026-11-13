@@ -7,10 +7,11 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { getNdbcService } from '@/services/ndbc/ndbc-service.js';
+import { getObservationAge } from '@/services/ndbc/observation-age.js';
 
 export const noaaMarineGetOceanObservations = tool('noaa_marine_get_ocean_observations', {
   title: 'Get Ocean Observations',
-  description: `Live sub-surface oceanographic observations from an NDBC station's water-quality sensors: at each reported depth, water temperature, conductivity, salinity, dissolved oxygen as both saturation percent and concentration in ppm, chlorophyll, turbidity, pH, and redox potential. This is the water-column counterpart to noaa_marine_get_conditions, which returns surface meteorological and wave data — use this tool for what the water is doing below the surface, that one for weather and sea state at the buoy. It returns the most recent observation as one reading per reported depth, and most stations report a single depth while some report several at the same time; sensor coverage is sparse, most stations populating only water temperature and salinity, and any value the station did not report comes back null rather than a fabricated zero, as do latitude and longitude for a station absent from the NDBC active-stations list. Sub-surface sensors are on only a subset of NDBC stations, so find one with noaa_marine_find_stations using source="ndbc" and types=["water_quality"], which filters on NDBC's own water-quality catalog flag — the flag and actual .ocean availability drift, so this tool reads any station that serves the file and returns observations_not_found for one that does not.`,
+  description: `Latest sub-surface oceanographic observations from an NDBC station's water-quality sensors: at each reported depth, water temperature, conductivity, salinity, dissolved oxygen as both saturation percent and concentration in ppm, chlorophyll, turbidity, pH, and redox potential. This is the water-column counterpart to noaa_marine_get_conditions, which returns surface meteorological and wave data — use this tool for what the water is doing below the surface, that one for weather and sea state at the buoy. It returns the most recent observation as one reading per reported depth, and most stations report a single depth while some report several at the same time; sensor coverage is sparse, most stations populating only water temperature and salinity, and any value the station did not report comes back null rather than a fabricated zero, as do latitude and longitude for a station absent from the NDBC active-stations list. Sub-surface sensors are on only a subset of NDBC stations, so find one with noaa_marine_find_stations using source="ndbc" and types=["water_quality"], which filters on NDBC's own water-quality catalog flag — the flag and actual .ocean availability can differ, so this tool reads any station that serves the file and returns observations_not_found for one that does not. The response includes observation_age_minutes and a notice when the latest observation is more than 180 minutes old.`,
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   input: z.object({
@@ -18,7 +19,7 @@ export const noaaMarineGetOceanObservations = tool('noaa_marine_get_ocean_observ
       .string()
       .regex(/^[A-Za-z0-9_-]{1,20}$/)
       .describe(
-        'NDBC station ID (mostly 5-character alphanumeric codes, e.g. "44033" or "TIBC1"; some are 7-digit numbers). Obtain from noaa_marine_find_stations with source="ndbc" and types=["water_quality"].',
+        'NDBC station ID (mostly 5-character alphanumeric codes, e.g. "44033"; some are 7-digit numbers). Obtain from noaa_marine_find_stations with source="ndbc" and types=["water_quality"].',
       ),
   }),
 
@@ -41,6 +42,12 @@ export const noaaMarineGetOceanObservations = tool('noaa_marine_get_ocean_observ
       .string()
       .describe(
         'ISO 8601 UTC timestamp of the observation. Always a valid instant — a row whose upstream time columns are malformed is rejected rather than timestamped with the current time.',
+      ),
+    observation_age_minutes: z
+      .number()
+      .int()
+      .describe(
+        'Elapsed minutes from observed_at to response time, rounded down. Negative for a future timestamp.',
       ),
     source: z.string().describe('Data source — always "ndbc" for this tool.'),
     reading_count: z
@@ -107,6 +114,15 @@ export const noaaMarineGetOceanObservations = tool('noaa_marine_get_ocean_observ
       ),
   }),
 
+  enrichment: {
+    notice: z
+      .string()
+      .optional()
+      .describe(
+        'Observation age and station discovery guidance when the latest observation is more than 180 minutes old.',
+      ),
+  },
+
   errors: [
     {
       reason: 'observations_not_found',
@@ -156,6 +172,9 @@ export const noaaMarineGetOceanObservations = tool('noaa_marine_get_ocean_observ
       throw err;
     }
 
+    const age = getObservationAge(observation.observedAt, 'water_quality');
+    if (age.notice !== undefined) ctx.enrich.notice(age.notice);
+
     ctx.log.info('NDBC ocean observations fetched', {
       station_id: input.station_id,
       observed_at: observation.observedAt,
@@ -168,6 +187,7 @@ export const noaaMarineGetOceanObservations = tool('noaa_marine_get_ocean_observ
       latitude: meta?.lat ?? null,
       longitude: meta?.lon ?? null,
       observed_at: observation.observedAt,
+      observation_age_minutes: age.minutes,
       source: 'ndbc',
       reading_count: observation.readings.length,
       readings: observation.readings.map((r) => ({
@@ -189,7 +209,7 @@ export const noaaMarineGetOceanObservations = tool('noaa_marine_get_ocean_observ
     const fmt = (v: number | null, unit: string) => (v !== null ? `${v} ${unit}` : 'not reported');
     const lines: string[] = [
       `## Ocean Observations — ${escapeMarkdownInline(result.station_name)} (${escapeMarkdownInline(result.station_id)})`,
-      `**Observed at:** ${result.observed_at} · **Source:** ${result.source} · **Depths:** ${result.reading_count}`,
+      `**Observed at:** ${result.observed_at} · **Observation age:** ${result.observation_age_minutes} minutes · **Source:** ${result.source} · **Depths:** ${result.reading_count}`,
       `**Location:** ${result.latitude ?? 'unknown'}, ${result.longitude ?? 'unknown'}`,
     ];
     for (const r of result.readings) {

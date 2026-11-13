@@ -12,6 +12,7 @@ import {
   getCoopsService,
   isCoopsBodyError,
   noGaugeHint,
+  retiredGaugeHint,
 } from '@/services/coops/coops-service.js';
 import {
   awaitsVerification,
@@ -168,7 +169,7 @@ export const noaaMarineGetMonthlyMeans = tool('noaa_marine_get_monthly_means', {
       .string()
       .optional()
       .describe(
-        'That limit was clamped to its cap, then what this page of the monthly series covers and how to reach the next page — whichever apply, composed into one string.',
+        'That limit was clamped to its cap, where a recent monthly series ends short of the requested range, and what this page covers — whichever apply, composed into one string.',
       ),
     truncated: z
       .boolean()
@@ -245,14 +246,14 @@ export const noaaMarineGetMonthlyMeans = tool('noaa_marine_get_monthly_means', {
     {
       reason: 'verified_data_lag',
       code: JsonRpcErrorCode.NotFound,
-      when: 'CO-OPS returned no months for a window ending on or after the first day of the prior month, which it may not have verified yet.',
+      when: 'CO-OPS returned no months for a window ending on or after the first day of the prior month, which it may not have verified yet. A window starting in a month after gauge removal returns no_data.',
       recovery:
         'CO-OPS verifies monthly means monthly, for the prior month, so request a window ending before the first day of the prior month.',
     },
     {
       reason: 'no_data',
       code: JsonRpcErrorCode.NotFound,
-      when: 'CO-OPS returned no months for a window ending before the prior month — the station has no monthly means for it.',
+      when: 'CO-OPS returned no monthly means for the range, including a range starting in a month after gauge removal.',
       recovery:
         "The station's record may begin after the window, or the station may publish no monthly means. Request a later window, or another station from noaa_marine_find_stations.",
     },
@@ -286,18 +287,31 @@ export const noaaMarineGetMonthlyMeans = tool('noaa_marine_get_monthly_means', {
      * window ending on or after the first day of the prior month may still be waiting on the
      * monthly verification; an earlier one never will be, so the recovery must not say to wait.
      */
-    const noMonths = (): McpError =>
+    const noMonths = (note: string): McpError =>
       awaitsVerification(range.end)
         ? ctx.fail(
             'verified_data_lag',
-            `CO-OPS has published no monthly means for station ${input.station_id} in a window ending ${input.end_date}.`,
+            `CO-OPS has published no monthly means for station ${input.station_id} in a window ending ${input.end_date}.${note}`,
           )
         : ctx.fail(
             'no_data',
-            `CO-OPS has no monthly means for station ${input.station_id} in a window ending ${input.end_date}. The window ends before the prior month, so it is not waiting on CO-OPS's monthly verification.`,
+            `CO-OPS has no monthly means for station ${input.station_id} in a window ending ${input.end_date}. The window ends before the prior month, so it is not waiting on CO-OPS's monthly verification.${note}`,
           );
 
     const svc = getCoopsService();
+    const retirementNote = async (purpose: 'datum' | 'retirement') => {
+      const gauge = await svc.lookupGauge(input.station_id, ctx, purpose);
+      if (gauge.kind !== 'retired') return { gauge, note: '' };
+      const note = ` The gauge was removed on ${gauge.removedDate}.`;
+      if (range.beginDate.slice(0, 6) > gauge.removedDate.replaceAll('-', '').slice(0, 6)) {
+        throw ctx.fail(
+          'no_data',
+          `Station ${input.station_id} has no monthly means for the requested range.${note}`,
+          { recovery: { hint: retiredGaugeHint(gauge.station) } },
+        );
+      }
+      return { gauge, note };
+    };
     const fetched = await svc
       .fetchMonthlyMeans(
         {
@@ -317,7 +331,7 @@ export const noaaMarineGetMonthlyMeans = tool('noaa_marine_get_monthly_means', {
            * leaves the datum retry standing.
            */
           if (err.coopsReason === 'datum_unavailable') {
-            const gauge = await svc.lookupGauge(input.station_id, ctx);
+            const { gauge, note } = await retirementNote('datum');
             if (gauge.kind === 'no_gauge') {
               throw ctx.fail(
                 'no_gauge',
@@ -325,10 +339,12 @@ export const noaaMarineGetMonthlyMeans = tool('noaa_marine_get_monthly_means', {
                 { recovery: { hint: noGaugeHint(input.station_id, gauge.tideStation) } },
               );
             }
-            const greatLakes = gauge.kind === 'gauge' && gauge.station.greatlakes === true;
+            const greatLakes =
+              (gauge.kind === 'gauge' || gauge.kind === 'retired') &&
+              gauge.station?.greatlakes === true;
             throw ctx.fail(
               'datum_unavailable',
-              `Station ${input.station_id} does not carry datum ${input.datum}.`,
+              `Station ${input.station_id} does not carry datum ${input.datum}.${note}`,
               { recovery: { hint: datumRetryHint(input.station_id, input.datum, greatLakes) } },
             );
           }
@@ -338,10 +354,11 @@ export const noaaMarineGetMonthlyMeans = tool('noaa_marine_get_monthly_means', {
               `CO-OPS does not recognize station ${input.station_id}.`,
             );
           }
-          if (err.coopsReason === 'product_not_offered') throw noMonths();
+          const { note } = await retirementNote('retirement');
+          if (err.coopsReason === 'product_not_offered') throw noMonths(note);
           throw ctx.fail(
             'no_data',
-            `No monthly means for station ${input.station_id} in the requested range.`,
+            `No monthly means for station ${input.station_id} in the requested range.${note}`,
           );
         }
         // An HTTP 400 whose body names no condition the classifier reads — CO-OPS's
@@ -366,6 +383,8 @@ export const noaaMarineGetMonthlyMeans = tool('noaa_marine_get_monthly_means', {
       Record<MonthValueKey, number>
     >;
     const months: Month[] = [];
+    let lastMonth: Month | undefined;
+    let lastMonthIndex = first - 1;
     for (const row of fetched.data) {
       const year = Number.parseInt(row.year, 10);
       const month = Number.parseInt(row.month, 10);
@@ -377,9 +396,13 @@ export const noaaMarineGetMonthlyMeans = tool('noaa_marine_get_monthly_means', {
         if (Number.isFinite(value)) entry[key] = value;
       }
       months.push(entry);
+      if (index > lastMonthIndex) {
+        lastMonth = entry;
+        lastMonthIndex = index;
+      }
     }
 
-    if (months.length === 0) throw noMonths();
+    if (!lastMonth) throw noMonths((await retirementNote('retirement')).note);
 
     // notice is last-wins, so the clamp and page sentences are composed once, clamp first — a
     // clamped request whose months all fit under the cap returns whole and still says so.
@@ -387,6 +410,12 @@ export const noaaMarineGetMonthlyMeans = tool('noaa_marine_get_monthly_means', {
     const page = pageRows(months, { offset: input.offset, limit: limit.applied });
     const notices: string[] = [];
     if (limit.notice) notices.push(limit.notice);
+    if (lastMonthIndex < last && awaitsVerification(range.end)) {
+      const month = String(lastMonth.month).padStart(2, '0');
+      notices.push(
+        `Last available month: ${lastMonth.year}-${month}. Later data may still await verification.`,
+      );
+    }
     if (!page.whole) {
       ctx.enrich(pageDisclosure(page));
       notices.push(pageNotice(page, 'months'));

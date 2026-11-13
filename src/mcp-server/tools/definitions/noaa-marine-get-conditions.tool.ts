@@ -1,5 +1,5 @@
 /**
- * @fileoverview noaa_marine_get_conditions tool — live NDBC buoy marine conditions.
+ * @fileoverview noaa_marine_get_conditions tool — latest marine conditions reported by an NDBC buoy.
  * @module mcp-server/tools/definitions/noaa-marine-get-conditions.tool
  */
 
@@ -7,6 +7,7 @@ import { type Context, tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { getNdbcService, type NdbcService } from '@/services/ndbc/ndbc-service.js';
+import { getObservationAge } from '@/services/ndbc/observation-age.js';
 import type { NdbcColumnGroup, NdbcObservation } from '@/services/ndbc/types.js';
 
 /**
@@ -50,7 +51,7 @@ async function readObservation(
 
 export const noaaMarineGetConditions = tool('noaa_marine_get_conditions', {
   title: 'Get Marine Conditions',
-  description: `Live marine conditions from an NDBC buoy: wave height, period and direction, wind speed, gust and direction, sea-surface temperature, air temperature, barometric pressure, and dew point. All values are SI units — wind in m/s, wave height in m, pressure in hPa, temperatures in °C — except TIDE, which is in feet, and VIS, in nautical miles, both rarely populated at offshore buoys; a numeric field is null when the buoy sensor did not report a value, which is normal offshore. Row cadence varies by station from 5 to 60 minutes, so observed_at can be that old, and NDBC writes each block of columns on its own cycle, so any block can resolve from an earlier row within 90 minutes of observed_at. Waves carry their own waves_observed_at, null when no wave sample falls inside that window, and any other block read from an earlier row is named with its measurement time in the response notice. Use noaa_marine_find_stations with source="ndbc" and types=["met"] to find station IDs near a location, since met-flagged stations are the ones most likely to serve live conditions: roughly a third of active NDBC stations report neither meteorological nor current data, most of those have no observation file, and omitting the types filter surfaces station IDs this tool cannot read. A 7-digit CO-OPS station ID also works when NDBC relays that gauge's met sensors under a station of its own: the response reads the relay, returns its ID as station_id with its name and coordinates, and returns the requested ID as coops_station_id; a gauge NDBC does not relay fails buoy_not_found.`,
+  description: `Latest marine conditions reported by an NDBC buoy: wave height, period and direction, wind speed, gust and direction, sea-surface temperature, air temperature, barometric pressure, and dew point. All values are SI units — wind in m/s, wave height in m, pressure in hPa, temperatures in °C — except TIDE, which is in feet, and VIS, in nautical miles, both rarely populated at offshore buoys; a numeric field is null when the buoy sensor did not report a value, which is normal offshore. Row cadence varies by station from 5 to 60 minutes. NDBC writes each block of columns on its own cycle, so any block can resolve from an earlier row within 90 minutes of observed_at. Waves carry their own waves_observed_at, null when no wave sample falls inside that window, and any other block read from an earlier row is named with its measurement time in the response notice. Use noaa_marine_find_stations with source="ndbc" and types=["met"] to find station IDs near a location, since met-flagged stations are the ones most likely to have a conditions feed: roughly a third of active NDBC stations report neither meteorological nor current data, most of those have no observation file, and omitting the types filter surfaces station IDs this tool cannot read. A 7-digit CO-OPS station ID also works when NDBC relays that gauge's met sensors under a station of its own: the response reads the relay, returns its ID as station_id with its name and coordinates, and returns the requested ID as coops_station_id; a gauge NDBC does not relay fails buoy_not_found. The response includes observation_age_minutes and a notice when the latest observation is more than 180 minutes old.`,
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   input: z.object({
@@ -91,6 +92,12 @@ export const noaaMarineGetConditions = tool('noaa_marine_get_conditions', {
       .string()
       .describe(
         'ISO 8601 UTC timestamp of the newest data row. Always a valid instant — a row whose upstream time columns are malformed is rejected rather than timestamped with the current time. A sensor block NDBC wrote on an earlier row was measured before this time: waves report theirs in waves_observed_at, and any other block is named with its own time in the notice.',
+      ),
+    observation_age_minutes: z
+      .number()
+      .int()
+      .describe(
+        'Elapsed minutes from observed_at to response time, rounded down. Negative for a future timestamp.',
       ),
     source: z.string().describe('Data source — always "ndbc" for this tool.'),
     wind_direction_deg: z
@@ -153,7 +160,7 @@ export const noaaMarineGetConditions = tool('noaa_marine_get_conditions', {
       .string()
       .optional()
       .describe(
-        'Present when a CO-OPS station ID was read through its NDBC relay (naming both IDs), when a sensor block other than waves was read from a row older than observed_at (naming each such block, the output fields it fills, and the time those values were measured), or both, in one string. Absent for a station read under its own ID whose blocks outside the wave columns all came from the newest row.',
+        'Includes any applicable CO-OPS relay IDs, fields and measurement times for non-wave sensor blocks read from rows older than observed_at, and observation age with station discovery guidance when the latest row is more than 180 minutes old.',
       ),
   },
 
@@ -230,6 +237,7 @@ export const noaaMarineGetConditions = tool('noaa_marine_get_conditions', {
       coopsStationId = requestedId;
     }
     const { obs } = read;
+    const age = getObservationAge(obs.observedAt, 'met');
 
     // `notice` is one field, and each write replaces the last, so every sentence joins into one.
     const notices: string[] = [];
@@ -251,6 +259,7 @@ export const noaaMarineGetConditions = tool('noaa_marine_get_conditions', {
         `Measured before observed_at (${obs.observedAt}) — ${measured}. NDBC writes each block of columns on its own cycle, so a block is read from the most recent row within 90 minutes that carried it.`,
       );
     }
+    if (age.notice !== undefined) notices.push(age.notice);
     if (notices.length > 0) ctx.enrich.notice(notices.join(' '));
 
     ctx.log.info('NDBC conditions fetched', {
@@ -269,6 +278,7 @@ export const noaaMarineGetConditions = tool('noaa_marine_get_conditions', {
       latitude: station?.lat ?? null,
       longitude: station?.lon ?? null,
       observed_at: obs.observedAt,
+      observation_age_minutes: age.minutes,
       source: 'ndbc',
       wind_direction_deg: obs.windDirectionDeg,
       wind_speed_ms: obs.windSpeedMs,
@@ -292,7 +302,7 @@ export const noaaMarineGetConditions = tool('noaa_marine_get_conditions', {
 
     const lines: string[] = [
       `## Marine Conditions — ${escapeMarkdownInline(result.station_name)} (${escapeMarkdownInline(result.station_id)})`,
-      `**Observed at:** ${result.observed_at} · **Source:** ${result.source}`,
+      `**Observed at:** ${result.observed_at} · **Observation age:** ${result.observation_age_minutes} minutes · **Source:** ${result.source}`,
       `**Location:** ${result.latitude ?? 'unknown'}, ${result.longitude ?? 'unknown'}`,
     ];
     if (result.coops_station_id !== undefined) {

@@ -29,7 +29,7 @@ const CurrentBinSchema = z
     bin: z
       .number()
       .describe(
-        'CO-OPS bin number — pass it as the bin input of noaa_marine_get_currents. Omitting bin there selects the shallowest bin.',
+        'CO-OPS bin number — pass it as the bin input of noaa_marine_get_currents. CO-OPS chooses the default bin when omitted.',
       ),
     depth: z
       .number()
@@ -47,7 +47,7 @@ const CurrentBinSchema = z
       .string()
       .optional()
       .describe(
-        "CO-OPS prediction class for this bin: harmonic (predicted from the bin's own harmonic analysis) or subordinate (derived by offsets from a reference station) both serve the normal flood/ebb/slack series, while weak_and_variable may instead answer noaa_marine_get_currents with a coverage statement and no events, or report that no predictions are published at all. The class is per bin because one station can mix classes across its bins. An unrecognized catalog code is passed through verbatim.",
+        "CO-OPS prediction class for this bin: Harmonic bins (predicted from the bin's own harmonic analysis) and subordinate bins (derived by offsets from a reference station) serve flood/ebb/slack events. Harmonic bins can also serve a continuous 6-minute curve. For a subordinate bin, a 6min request may return events with a notice. A weak_and_variable bin may answer noaa_marine_get_currents with a coverage statement and no events, or report that no predictions are published at all. The class is per bin because one station can mix classes across its bins. An unrecognized catalog code is passed through verbatim.",
       ),
   })
   .describe(
@@ -130,7 +130,7 @@ type SourceReport = z.infer<typeof SourceReportSchema>;
  * names a filter the handler used, so an unsatisfiable combination reads differently from a
  * genuine miss and the recovery points at the filter worth changing.
  */
-function describeEmptySearch(applied: AppliedSearch): string {
+function describeEmptySearch(applied: AppliedSearch, queryMatchCount: number): string {
   if (applied.catalogs_read.length === 0) {
     return [
       'No catalog was searched: state is a CO-OPS-only filter that excludes NDBC buoys, and',
@@ -163,10 +163,21 @@ function describeEmptySearch(applied: AppliedSearch): string {
   }
 
   if (applied.query) {
-    applied_clauses.push(
-      `query "${applied.query}" matched no station name or ID in ${applied.catalogs_read.join(' or ')}`,
-    );
-    widen.push('shorten the query or check its spelling');
+    if (queryMatchCount > 0) {
+      const filters = [
+        ...(applied.state ? ['state'] : []),
+        ...(applied.types ? ['types'] : []),
+        ...(applied.center ? ['radius_km'] : []),
+      ];
+      applied_clauses.push(
+        `query "${applied.query}" matched ${queryMatchCount} station${queryMatchCount === 1 ? '' : 's'} in ${applied.catalogs_read.join(' or ')}, none of which passed the remaining filters (${filters.join(', ')})`,
+      );
+    } else {
+      applied_clauses.push(
+        `query "${applied.query}" matched no station name or ID in ${applied.catalogs_read.join(' or ')}`,
+      );
+      widen.push('shorten the query or check its spelling');
+    }
   }
 
   if (applied.center && applied.radius_km !== undefined) {
@@ -185,7 +196,7 @@ function describeEmptySearch(applied: AppliedSearch): string {
 
 export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
   title: 'Find Marine Stations',
-  description: `Find CO-OPS tide, water-level and current stations and NDBC buoys near a location, by name, or by station ID, returning a unified list with source, data capabilities, coordinates, and — for NDBC — the physical platform class. This is the required first step for resolving a coordinate pair, a station name, or a bare station number to the station IDs the data tools take (query matches station names and IDs, not places, so a town or marina no station is named after needs geocoding to coordinates first): CO-OPS tide and water-level IDs are numeric (e.g. 9447130 for Seattle), CO-OPS current IDs are alphanumeric (e.g. ACT4176), and NDBC station IDs are mostly 5-character alphanumeric codes (e.g. 46041), with some 7-digit numbers. Two axes are reported separately — capabilities and type name the data products a station serves (tide, current, water_level, met, current_profile, water_quality), while platform is the NDBC physical classification (buoy, fixed, oilrig, dart, tao, usv, other) that CO-OPS stations do not carry. Supply latitude and longitude together for a proximity search, or query for a name-or-ID substring matched against both sources, or state for CO-OPS coverage in one state; the filters combine, and results lead with an exact ID match unless a proximity search is ordering them by distance. A search that matches nothing is a success with total_found: 0 carrying an echo of the filters that were applied, and a search whose catalogs did not all answer says which source is missing. CO-OPS prediction stations carry a third axis as well, prediction_class, which says what a station can actually answer: a tide station is either reference, serving both hilo and the 6-minute curve, or subordinate, serving hilo only, while a current station carries its class per depth bin in bins[] — a harmonic or subordinate bin serves the normal flood/ebb/slack series, and a weak_and_variable bin may instead answer noaa_marine_get_currents with a coverage statement and no events, or report that CO-OPS publishes no predictions for it at all, so prefer a harmonic bin when one is in range.`,
+  description: `Find CO-OPS tide, water-level and current stations and NDBC buoys near a location, by name, or by station ID, returning a unified list with source, data capabilities, coordinates, and — for NDBC — the physical platform class. This is the required first step for resolving a coordinate pair, a station name, or a bare station number to the station IDs the data tools take (query matches station names and IDs, not places, so a town or marina no station is named after needs geocoding to coordinates first): CO-OPS tide and water-level IDs are numeric (e.g. 9447130 for Seattle), CO-OPS current IDs are alphanumeric (e.g. ACT4176), and NDBC station IDs are mostly 5-character alphanumeric codes (e.g. 46041), with some 7-digit numbers. Two axes are reported separately — capabilities and type name the data products a station serves (tide, current, water_level, met, current_profile, water_quality), while platform is the NDBC physical classification (buoy, fixed, oilrig, dart, tao, usv, other) that CO-OPS stations do not carry. Supply latitude and longitude together for a proximity search, or query for a name-or-ID substring matched against both sources, or state for CO-OPS coverage in one state; the filters combine, and results lead with an exact ID match unless a proximity search is ordering them by distance. A search that matches nothing is a success with total_found: 0 carrying an echo of the filters that were applied, and a search whose catalogs did not all answer says which source is missing. CO-OPS prediction stations carry a third axis as well, prediction_class, which says what a station can actually answer: a tide station is either reference, serving both hilo and the 6-minute curve, or subordinate, serving hilo only, while a current station carries its class per depth bin in bins[] — harmonic and subordinate bins serve flood/ebb/slack events, and harmonic bins can serve a continuous 6-minute curve. A subordinate bin may return events on a 6min request. A weak_and_variable bin may instead answer noaa_marine_get_currents with a coverage statement and no events, or report that CO-OPS publishes no predictions for it at all, so prefer a harmonic bin when one is in range.`,
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   input: z.object({
@@ -244,7 +255,7 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
             'buoy',
           ])
           .describe(
-            "Filter value. Six are data capabilities, matched against a station's capabilities list: tide (CO-OPS tide predictions → noaa_marine_get_tide_predictions), current (CO-OPS tidal-current predictions → noaa_marine_get_currents), water_level (CO-OPS observed water levels → noaa_marine_get_water_level, and their verified monthly means → noaa_marine_get_monthly_means), met (NDBC meteorological → noaa_marine_get_conditions), current_profile (NDBC observed ocean-current depth profile → noaa_marine_get_current_profile; note this is a different data product and source than CO-OPS `current`), water_quality (NDBC sub-surface water-column sensors → noaa_marine_get_ocean_observations). The seventh, buoy, is a physical-platform filter (NDBC platform class equals buoy), not a data capability — use it to select buoy-class platforms regardless of what data they serve.",
+            "Filter value. Six are data capabilities, matched against a station's capabilities list: tide (CO-OPS tide predictions → noaa_marine_get_tide_predictions), current (CO-OPS tidal-current predictions → noaa_marine_get_currents), water_level (CO-OPS observed water levels → noaa_marine_get_water_level, and their verified monthly means → noaa_marine_get_monthly_means), met (NDBC meteorological → noaa_marine_get_conditions), current_profile (NDBC observed ocean-current depth profile → noaa_marine_get_current_profile; note this is a different data product and source than CO-OPS `current`), water_quality (NDBC sub-surface water-column sensors → noaa_marine_get_ocean_observations). NDBC capability flags identify candidate stations, and the corresponding feed can be unavailable. The seventh, buoy, is a physical-platform filter (NDBC platform class equals buoy), not a data capability — use it to select buoy-class platforms regardless of what data they serve.",
           ),
       )
       .optional()
@@ -471,6 +482,8 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
       typeFilter?.find((t) => capabilities.includes(t)) ?? capabilities[0];
 
     const results: StationResult[] = [];
+    /** Query matches in the catalogs that answered, before row-level filters. */
+    const queryMatches = new Set<string>();
     /** `source:id` of every row whose station ID equals the query exactly — these lead the list. */
     const exactIdMatches = new Set<string>();
 
@@ -571,10 +584,11 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
       }
 
       for (const s of allCoops.values()) {
+        if (!matchesQuery(s.name, s.id)) continue;
+        if (query) queryMatches.add(`coops:${s.id}`);
         if (!matchesTypeFilter(s.capabilities)) continue;
         const resolved = states.get(s.id);
         if (input.state && resolved?.state !== input.state) continue;
-        if (!matchesQuery(s.name, s.id)) continue;
 
         const entry: StationResult = {
           station_id: s.id,
@@ -613,6 +627,8 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
     // Process NDBC stations
     if (ndbcResult.status === 'fulfilled' && ndbcResult.value) {
       for (const s of ndbcResult.value) {
+        if (!matchesQuery(s.name, s.id)) continue;
+        if (query) queryMatches.add(`ndbc:${s.id}`);
         // Data capabilities come only from the NDBC catalog flags — never the platform class.
         // `current_profile` is NDBC observed ocean currents (the .adcp profile
         // noaa_marine_get_current_profile reads), named apart from CO-OPS `current` (tidal-current
@@ -631,7 +647,6 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
         const matchTokens = platform ? [...capabilities, platform] : capabilities;
 
         if (!matchesTypeFilter(matchTokens)) continue;
-        if (!matchesQuery(s.name, s.id)) continue;
 
         const entry: StationResult = {
           station_id: s.id,
@@ -730,7 +745,7 @@ export const noaaMarineFindStations = tool('noaa_marine_find_stations', {
           : {}),
       };
       ctx.enrich({ applied_search: applied });
-      notices.push(describeEmptySearch(applied));
+      notices.push(describeEmptySearch(applied, queryMatches.size));
     }
 
     if (notices.length > 0) ctx.enrich.notice(notices.join(' '));

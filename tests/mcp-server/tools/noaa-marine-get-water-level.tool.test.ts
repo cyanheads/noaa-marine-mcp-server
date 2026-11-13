@@ -152,10 +152,14 @@ describe('noaaMarineGetWaterLevel', () => {
   it('throws ctx.fail("no_data") when observation array is empty', async () => {
     const ctx = createMockContext({ errors: noaaMarineGetWaterLevel.errors });
 
-    const { getCoopsService } = await import('@/services/coops/coops-service.js');
-    const svc = getCoopsService();
-    vi.spyOn(svc, 'fetchWaterLevel').mockResolvedValue({ data: [], stationName: 'Empty' });
-    vi.spyOn(svc, 'fetchWaterLevelPredictions').mockResolvedValue([]);
+    const http = installCoopsFake((endpoint, url) => {
+      if (endpoint === 'catalog') return Response.json({ stations: [] });
+      if (endpoint === 'details') return new Response(null, { status: 404 });
+      if (url.searchParams.get('product') === 'predictions')
+        return Response.json({ predictions: [] });
+      return Response.json({ metadata: { name: 'Empty' }, data: [] });
+    });
+    onTestFinished(() => http.restore());
 
     const input = noaaMarineGetWaterLevel.input.parse({
       station_id: '9999999',
@@ -246,6 +250,10 @@ describe('noaaMarineGetWaterLevel', () => {
       interval: '6min' as const,
       observations: [{ time: '2025-01-15 12:00', value: 8.23, sigma: 0.01, quality: 'p' }],
       predictions: [{ time: '2025-01-15 12:00', value: 8.2 }],
+      observed_extremes: {
+        max: { time: '2025-01-15 12:00', value: 8.23 },
+        min: { time: '2025-01-15 12:00', value: 8.23 },
+      },
       residual_summary: { max_surge: 0.03, max_drawdown: 0 },
     };
     const blocks = noaaMarineGetWaterLevel.format!(output);
@@ -260,6 +268,27 @@ describe('noaaMarineGetWaterLevel', () => {
   // does not carry is its own reason rather than a bogus instruction to re-verify the ID ---
 
   describe('datum', () => {
+    it.each(['LWI', 'HWI'])('rejects the %s interval before contacting CO-OPS', async (datum) => {
+      const http = installCoopsFake(healthyCoops);
+      onTestFinished(() => http.restore());
+      const result = await runToolContract(noaaMarineGetWaterLevel, {
+        station_id: '9447130',
+        begin_date: '20250115',
+        end_date: '20250115',
+        datum,
+      } as never);
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: { code: JsonRpcErrorCode.InvalidParams },
+      });
+      expect(result.content).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ text: expect.stringContaining('datum') }),
+        ]),
+      );
+      expect(http.calls).toHaveLength(0);
+    });
+
     /** Calumet Harbor — the `waterlevels` catalog marks it `greatlakes: true`. */
     const GREAT_LAKES_STATION = {
       id: '9087044',
@@ -279,7 +308,7 @@ describe('noaaMarineGetWaterLevel', () => {
       greatlakes: false,
     };
 
-    it('accepts every datum the water_level product serves', () => {
+    it('accepts all supported height datums', () => {
       for (const datum of [
         'MLLW',
         'MHHW',
@@ -292,8 +321,6 @@ describe('noaaMarineGetWaterLevel', () => {
         'IGLD',
         'LWD',
         'CRD',
-        'LWI',
-        'HWI',
       ]) {
         const parsed = noaaMarineGetWaterLevel.input.parse({
           station_id: '9447130',
@@ -781,6 +808,39 @@ describe('noaaMarineGetWaterLevel', () => {
       http = undefined;
     });
 
+    it('reports a removed gauge before considering verification lag', async () => {
+      now('2026-09-22T12:00:00Z');
+      const station = { id: '9448794', name: 'Anacortes', lat: 48.51, lng: -122.61 };
+      http = installCoopsFake((endpoint, url) => {
+        if (endpoint === 'details')
+          return Response.json({ id: station.id, removed: '1995-05-17 23:00:00' });
+        if (endpoint === 'catalog') {
+          return Response.json({
+            stations: url.searchParams.get('type') === 'historicwl' ? [station] : [],
+          });
+        }
+        return url.searchParams.get('product') === 'hourly_height'
+          ? Response.json({
+              error: {
+                message:
+                  'No data was found. This product may not be offered at this station at the requested time.',
+              },
+            })
+          : healthyCoops(endpoint, url);
+      });
+      const result = await runToolContract(noaaMarineGetWaterLevel, {
+        station_id: station.id,
+        begin_date: '20260801',
+        end_date: '20260831',
+        interval: 'hourly',
+        datum: 'STND',
+      });
+      expect(errorOf(result).data?.reason).toBe('no_data');
+      expect(hintOf(result)).toContain('latitude 48.51, longitude -122.61');
+      expect(textOf(result)).toContain('1995-05-17');
+      expect(textOf(result)).toContain('noaa_marine_find_stations');
+    });
+
     type Result = Awaited<ReturnType<typeof runToolContract>>;
     const errorOf = (r: Result) =>
       (r.structuredContent as { error: { code: number; data?: Record<string, unknown> } }).error;
@@ -1056,7 +1116,11 @@ describe('noaaMarineGetWaterLevel', () => {
       // Only the two finite pairs join: 8.11 − 8.00 = 0.11 and 8.44 − 8.40 = 0.04. The three
       // gap slots have a prediction but no observation, so they contribute no residual at all.
       // Both pairs sit above prediction, so there is no drawdown.
-      expect(result.residual_summary).toEqual({ max_surge: 0.11, max_drawdown: 0 });
+      expect(result.residual_summary).toEqual({
+        max_surge: 0.11,
+        max_drawdown: 0,
+        max_surge_at: '2026-09-10 14:06',
+      });
     });
 
     it('discloses the dropped-gap count on both consumption surfaces', async () => {
@@ -1109,18 +1173,27 @@ describe('noaaMarineGetWaterLevel', () => {
         { time: '2025-01-15 12:00', value: 8.23, sigma: 0.01, quality: 'p' },
         { time: '2025-01-15 12:06', value: 8.31, sigma: 0.01, quality: 'p' },
       ]);
-      expect(structured.residual_summary).toEqual({ max_surge: 0.03, max_drawdown: 0 });
+      expect(structured.residual_summary).toEqual({
+        max_surge: 0.03,
+        max_drawdown: 0,
+        max_surge_at: '2025-01-15 12:00',
+      });
     });
 
     it('reports no_data when every row CO-OPS sent was a gap', async () => {
       const ctx = createMockContext({ errors: noaaMarineGetWaterLevel.errors });
-      const { getCoopsService } = await import('@/services/coops/coops-service.js');
-      const svc = getCoopsService();
-      vi.spyOn(svc, 'fetchWaterLevel').mockResolvedValue({
-        data: GAP_ROWS.filter((row) => row.v === ''),
-        stationName: 'East Bay',
+      const http = installCoopsFake((endpoint, url) => {
+        if (endpoint === 'catalog')
+          return Response.json({ stations: [{ id: '8726674', name: 'East Bay' }] });
+        if (endpoint === 'details') throw new Error(`Unexpected details request: ${url}`);
+        if (url.searchParams.get('product') === 'predictions')
+          return Response.json({ predictions: [] });
+        return Response.json({
+          data: GAP_ROWS.filter((row) => row.v === ''),
+          metadata: { name: 'East Bay' },
+        });
       });
-      vi.spyOn(svc, 'fetchWaterLevelPredictions').mockResolvedValue([]);
+      onTestFinished(() => http.restore());
 
       const input = noaaMarineGetWaterLevel.input.parse({
         station_id: '8726674',
@@ -1131,6 +1204,7 @@ describe('noaaMarineGetWaterLevel', () => {
         code: JsonRpcErrorCode.NotFound,
         data: { reason: 'no_data' },
       });
+      expect(callsTo(http, 'details')).toHaveLength(0);
     });
 
     it('keeps sigma off a gap row and on the rows that carry one', async () => {
@@ -1197,23 +1271,38 @@ describe('noaaMarineGetWaterLevel', () => {
     it('reports no surge on a window that sat below prediction throughout', async () => {
       const { structured, text } = await residualFor([-0.03, -0.4, -1.62, -0.9, -0.2, -0.05]);
 
-      expect(structured.residual_summary).toEqual({ max_surge: 0, max_drawdown: 1.62 });
-      expect(text).toContain('**Max surge:** 0 ft · **Max drawdown:** 1.62 ft');
+      expect(structured.residual_summary).toEqual({
+        max_surge: 0,
+        max_drawdown: 1.62,
+        max_drawdown_at: '2026-09-16 00:12',
+      });
+      expect(text).toContain('**Max surge:** 0 ft · **Max drawdown:** 1.62 ft at 2026-09-16 00:12');
       expect(text).not.toContain('-0.03 ft');
     });
 
     it('reports no drawdown on a window that sat above prediction throughout', async () => {
       const { structured, text } = await residualFor([1.99, 2.4, 2.83, 2.1, 2.05, 2.2]);
 
-      expect(structured.residual_summary).toEqual({ max_surge: 2.83, max_drawdown: 0 });
-      expect(text).toContain('**Max surge:** 2.83 ft · **Max drawdown:** 0 ft');
+      expect(structured.residual_summary).toEqual({
+        max_surge: 2.83,
+        max_drawdown: 0,
+        max_surge_at: '2026-09-16 00:12',
+      });
+      expect(text).toContain('**Max surge:** 2.83 ft at 2026-09-16 00:12 · **Max drawdown:** 0 ft');
     });
 
     it('leaves a mixed-sign window at its true magnitudes on both sides', async () => {
       const { structured, text } = await residualFor([0.3, -0.12, 0.47, -0.25, 0.01, -0.04]);
 
-      expect(structured.residual_summary).toEqual({ max_surge: 0.47, max_drawdown: 0.25 });
-      expect(text).toContain('**Max surge:** 0.47 ft · **Max drawdown:** 0.25 ft');
+      expect(structured.residual_summary).toEqual({
+        max_surge: 0.47,
+        max_drawdown: 0.25,
+        max_surge_at: '2026-09-16 00:12',
+        max_drawdown_at: '2026-09-16 00:18',
+      });
+      expect(text).toContain(
+        '**Max surge:** 0.47 ft at 2026-09-16 00:12 · **Max drawdown:** 0.25 ft at 2026-09-16 00:18',
+      );
     });
 
     it('applies the same convention in metric units', async () => {
@@ -1222,14 +1311,37 @@ describe('noaaMarineGetWaterLevel', () => {
         'metric',
       );
 
-      expect(structured.residual_summary).toEqual({ max_surge: 0, max_drawdown: 0.5 });
-      expect(text).toContain('**Max surge:** 0 m · **Max drawdown:** 0.5 m');
+      expect(structured.residual_summary).toEqual({
+        max_surge: 0,
+        max_drawdown: 0.5,
+        max_drawdown_at: '2026-09-16 00:06',
+      });
+      expect(text).toContain('**Max surge:** 0 m · **Max drawdown:** 0.5 m at 2026-09-16 00:06');
     });
 
     it('reports 0 on both sides when every observation equals its prediction', async () => {
       const { structured } = await residualFor([0, 0, 0, 0, 0, 0]);
 
       expect(structured.residual_summary).toEqual({ max_surge: 0, max_drawdown: 0 });
+    });
+
+    it('uses the earliest exact extreme and keeps times for events that round to zero', async () => {
+      const { structured, text } = await residualFor([0.001, 0.002, 0.002, -0.001, -0.003, -0.003]);
+      expect(structured.residual_summary).toEqual({
+        max_surge: 0,
+        max_surge_at: '2026-09-16 00:06',
+        max_drawdown: 0,
+        max_drawdown_at: '2026-09-16 00:24',
+      });
+      expect(structured).toMatchObject({
+        observed_extremes: {
+          max: { time: '2026-09-16 00:06', value: 5.002 },
+          min: { time: '2026-09-16 00:24', value: 4.997 },
+        },
+      });
+      expect(text).toContain(
+        '**Max surge:** 0 ft at 2026-09-16 00:06 · **Max drawdown:** 0 ft at 2026-09-16 00:24',
+      );
     });
   });
 
@@ -1546,7 +1658,7 @@ describe('noaaMarineGetWaterLevel', () => {
       expect(structured.next_offset).toBe(3);
     });
 
-    it('computes the residual summary from the full matched series, not the page', async () => {
+    it.each([0, 720])('reports extrema across the full series at offset %i', async (offset) => {
       const { getCoopsService } = await import('@/services/coops/coops-service.js');
       const svc = getCoopsService();
       // The only surge in the range sits on the last slot, far past the first page.
@@ -1560,12 +1672,20 @@ describe('noaaMarineGetWaterLevel', () => {
         begin_date: '20260901',
         end_date: '20260903',
         station_id: '9447130',
+        offset,
       });
-      const structured = result.structuredContent as {
-        residual_summary?: { max_surge: number };
-      };
-
-      expect(structured.residual_summary?.max_surge).toBeCloseTo(4.05, 2);
+      expect(result.structuredContent).toMatchObject({
+        observed_extremes: {
+          max: { time: spike[719]!.t, value: Number(spike[719]!.v) },
+          min: { time: spike[0]!.t, value: Number(spike[0]!.v) },
+        },
+        residual_summary: { max_surge: 4.05, max_surge_at: spike[719]!.t },
+      });
+      const content = result.content.map((block) => (block as { text?: string }).text).join('\n');
+      expect(content).toContain(
+        `**Max observed:** ${Number(spike[719]!.v)} ft at ${spike[719]!.t}`,
+      );
+      expect(content).toContain(`**Max surge:** 4.05 ft at ${spike[719]!.t}`);
     });
 
     it('clamps across the full matched series on every page, not only the first', async () => {
@@ -1596,7 +1716,11 @@ describe('noaaMarineGetWaterLevel', () => {
       }
 
       for (const summary of summaries) {
-        expect(summary).toEqual({ max_surge: 0, max_drawdown: 3.05 });
+        expect(summary).toEqual({
+          max_surge: 0,
+          max_drawdown: 3.05,
+          max_drawdown_at: '2026-09-03 23:54',
+        });
       }
     });
 
@@ -1628,6 +1752,51 @@ describe('noaaMarineGetWaterLevel', () => {
   // --- #30: the coarser CO-OPS water-level products ---
 
   describe('interval products', () => {
+    it.each([
+      ['hourly', 'gmt', '20261031', '2026-10-31 23:00', false],
+      ['hourly', 'gmt', '20261105', '2026-10-31 23:00', true],
+      ['hourly', 'lst_ldt', '20261031', '2026-10-31 16:00', true],
+      ['hourly', 'gmt', '20260930', '2026-09-29 23:00', false],
+      ['high_low', 'gmt', '20261031', '2026-10-31 23:36', false],
+      ['daily_mean', 'gmt', '20261031', '2026-10-30 00:00', true],
+    ] as const)(
+      'checks recent %s coverage in %s through %s',
+      async (interval, time_zone, end_date, time, partial) => {
+        vi.useFakeTimers({ toFake: ['Date'] });
+        vi.setSystemTime(new Date('2026-11-13T12:00:00Z'));
+        onTestFinished(() => {
+          vi.useRealTimers();
+        });
+        await mockProduct(
+          [{ t: time, v: '5' }],
+          [],
+          interval === 'daily_mean' ? [GREAT_LAKES] : [COASTAL],
+        );
+        const result = await runToolContract(noaaMarineGetWaterLevel, {
+          station_id: interval === 'daily_mean' ? '9087044' : '9447130',
+          begin_date: '20260901',
+          end_date,
+          interval,
+          time_zone,
+          offset: 1,
+        });
+        expect(result.structuredContent).toMatchObject({ observations: [], rows_matched: 1 });
+        const { notice } = result.structuredContent as { notice: string };
+        const rendered = result.content
+          .map((block) => (block as { text?: string }).text)
+          .join('\n');
+        if (partial) {
+          const last = `Last available observation: ${interval === 'daily_mean' ? time.slice(0, 10) : time}`;
+          expect(notice).toContain(last);
+          expect(notice).toContain('Later data may still await verification.');
+          expect(rendered).toContain(last);
+        } else {
+          expect(notice).not.toContain('await verification');
+          expect(rendered).not.toContain('await verification');
+        }
+      },
+    );
+
     /** Live `hourly_height` rows — `{t,v,s,f}`, no `q`. */
     const HOURLY_ROWS = [
       { t: '2025-01-01 00:00', v: '10.94', s: '0.026', f: '0,0' },
@@ -1792,6 +1961,10 @@ describe('noaaMarineGetWaterLevel', () => {
 
       expect(structured).not.toHaveProperty('residual_summary');
       expect(structured.predictions).toHaveLength(4);
+      expect(structured.observed_extremes).toEqual({
+        max: { time: '2025-01-01 13:18', value: 11.803 },
+        min: { time: '2025-01-01 06:42', value: 1.204 },
+      });
       expect(String(structured.notice)).toContain('residual');
     });
 
@@ -1832,6 +2005,10 @@ describe('noaaMarineGetWaterLevel', () => {
       expect(svc.fetchWaterLevelPredictions).not.toHaveBeenCalled();
       expect(structured.predictions).toEqual([]);
       expect(structured).not.toHaveProperty('residual_summary');
+      expect(structured.observed_extremes).toEqual({
+        max: { time: '2025-01-01 00:00', value: 578.281 },
+        min: { time: '2025-01-02 00:00', value: 578.143 },
+      });
       // Not "CO-OPS returned no prediction rows" — the product has no paired series at all.
       expect(structured).not.toHaveProperty('predictions_status');
       expect(String(structured.notice)).toContain('daily_mean');

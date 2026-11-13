@@ -1,7 +1,7 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.cyanheads/noaa-marine-mcp-server",
-  "description": "Find NOAA tide stations and NDBC buoys, fetch tide predictions, currents, and live conditions.",
+  "description": "Find NOAA tide stations and NDBC buoys, fetch tide predictions, currents, and latest observations.",
   "repository": {
     "url": "https://github.com/cyanheads/noaa-marine-mcp-server",
     "source": "github"

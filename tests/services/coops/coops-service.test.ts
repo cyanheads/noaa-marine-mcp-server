@@ -7,13 +7,18 @@
 
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createFetchMock, createMockContext } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import {
   datumRetryHint,
   getCoopsService,
   initCoopsService,
 } from '@/services/coops/coops-service.js';
-import { type CoopsEndpoint, callsTo, installCoopsFake } from '../../support/coops-http.js';
+import {
+  type CoopsEndpoint,
+  callsTo,
+  coopsEndpoint,
+  installCoopsFake,
+} from '../../support/coops-http.js';
 
 /** A live `MAX_SLACK` envelope: `Velocity_Major` and the mean bearings are JSON numbers, `Bin` and `Depth` strings. */
 const MAX_SLACK_BODY = {
@@ -605,9 +610,91 @@ describe('CoopsService.lookupGauge', () => {
       const gauge = await getCoopsService().lookupGauge('1612340', createMockContext());
       expect(gauge).toMatchObject({ kind: 'gauge', station: { id: '1612340' } });
       expect(catalogTypes(http)).toEqual(['waterlevels']);
+      expect(callsTo(http, 'details')).toHaveLength(0);
     } finally {
       http.restore();
     }
+  });
+
+  it.each([
+    ['1995-05-17 23:00:00', '1995-05-17'],
+    ['1995-02-30 00:00:00', undefined],
+    [null, undefined],
+    ['unavailable', undefined],
+  ])('uses station details removal %s only when valid', async (removed, expected) => {
+    const http = installCoopsFake((endpoint, url) => {
+      if (endpoint === 'details') {
+        return removed === 'unavailable'
+          ? new Response(null, { status: 503 })
+          : Response.json({ id: '1611347', removed });
+      }
+      const type = url.searchParams.get('type');
+      return Response.json({ stations: type === 'historicwl' ? [PORT_ALLEN] : [HONOLULU] });
+    });
+    onTestFinished(() => http.restore());
+    const gauge = await getCoopsService().lookupGauge('1611347', createMockContext());
+    expect(gauge).toMatchObject(
+      expected
+        ? { kind: 'retired', removedDate: expected, station: PORT_ALLEN }
+        : { kind: 'gauge', station: PORT_ALLEN },
+    );
+    expect(callsTo(http, 'details').map((url) => url.pathname)).toEqual([
+      '/mdapi/prod/webapi/stations/1611347/details.json',
+    ]);
+  });
+
+  it.each(['budget', 'caller'])('honors the %s signal during station details', async (source) => {
+    const budget = new AbortController();
+    const caller = new AbortController();
+    const timeout = vi.spyOn(AbortSignal, 'timeout').mockReturnValue(budget.signal);
+    const http = installCoopsFake((endpoint, url) => {
+      if (endpoint === 'details') {
+        if (source === 'caller') caller.abort(new DOMException('Client cancelled', 'AbortError'));
+        else budget.abort(new DOMException('Lookup budget spent', 'TimeoutError'));
+        return Response.json({ id: '1611347', removed: '1995-05-17 23:00:00' });
+      }
+      const type = url.searchParams.get('type');
+      return Response.json({ stations: type === 'historicwl' ? [PORT_ALLEN] : [HONOLULU] });
+    });
+    onTestFinished(() => http.restore());
+    const result = getCoopsService().lookupGauge(
+      '1611347',
+      createMockContext({ signal: caller.signal }),
+    );
+    if (source === 'caller') await expect(result).rejects.toBeInstanceOf(Error);
+    else await expect(result).resolves.toMatchObject({ kind: 'gauge', station: PORT_ALLEN });
+    expect(timeout).toHaveBeenCalledExactlyOnceWith(15_000);
+    expect(catalogTypes(http)).toEqual(['waterlevels', 'historicwl']);
+    expect(callsTo(http, 'details')).toHaveLength(1);
+  });
+
+  it('keeps the tide row when station details spend the remaining lookup budget', async () => {
+    const budget = new AbortController();
+    const timeout = vi.spyOn(AbortSignal, 'timeout').mockReturnValue(budget.signal);
+    const http = createFetchMock([
+      {
+        match: (request) => coopsEndpoint(request.url) !== undefined,
+        respond: (request) => {
+          request.signal.throwIfAborted();
+          if (coopsEndpoint(request.url) === 'details') {
+            budget.abort(new DOMException('Lookup budget spent', 'TimeoutError'));
+            request.signal.throwIfAborted();
+          }
+          const type = new URL(request.url).searchParams.get('type');
+          return Response.json({ stations: type === 'tidepredictions' ? [WAIMEA_TIDE] : [] });
+        },
+      },
+    ]);
+    http.install();
+    onTestFinished(() => http.restore());
+
+    await expect(getCoopsService().lookupGauge('1611401', createMockContext())).resolves.toEqual({
+      kind: 'no_gauge',
+      tideStation: WAIMEA_TIDE,
+    });
+    expect(timeout).toHaveBeenCalledExactlyOnceWith(15_000);
+    expect(catalogTypes(http)).toEqual(['waterlevels', 'historicwl', 'tidepredictions']);
+    expect(callsTo(http, 'details')).toHaveLength(1);
   });
 
   it('answers a retired gauge absent from waterlevels from historicwl', async () => {

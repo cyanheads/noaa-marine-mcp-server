@@ -1,6 +1,6 @@
 <div align="center">
   <h1>@cyanheads/noaa-marine-mcp-server</h1>
-  <p><b>Find NOAA tide stations and NDBC buoys, fetch tide predictions, water levels, tidal currents, and live buoy conditions via MCP. STDIO or Streamable HTTP.</b>
+  <p><b>Find NOAA tide stations and NDBC buoys, fetch tide predictions, water levels, tidal currents, and latest buoy observations via MCP. STDIO or Streamable HTTP.</b>
   <div>8 Tools • 1 Resource • 1 Skill</div>
   </p>
 </div>
@@ -29,7 +29,7 @@
 
 ## Overview
 
-US tides, currents, water levels, and buoy observations from NOAA CO-OPS and NDBC. Find coastal stations and buoys, then fetch tide and tidal-current predictions, observed and monthly-mean water levels, and live buoy conditions, current profiles, and water-column readings.
+US tides, currents, water levels, and buoy observations from NOAA CO-OPS and NDBC. Find coastal stations and buoys, then fetch tide and tidal-current predictions, observed and monthly-mean water levels, and the latest buoy conditions, current profiles, and water-column readings.
 
 ### Tools
 
@@ -37,10 +37,10 @@ US tides, currents, water levels, and buoy observations from NOAA CO-OPS and NDB
 |:-----|:------------|
 | `noaa_marine_find_stations` | Find CO-OPS tide, water-level, and current stations and NDBC buoys by location, name, ID, state, or capability |
 | `noaa_marine_get_tide_predictions` | High/low tide predictions or a 6-minute curve for a CO-OPS tide station |
-| `noaa_marine_get_water_level` | Observed water level at four cadences, paired with predictions and a storm-surge residual |
+| `noaa_marine_get_water_level` | Observed water level at four cadences, with extrema and storm-surge residuals where available |
 | `noaa_marine_get_monthly_means` | Verified monthly tidal datums and extremes for a CO-OPS water-level station |
-| `noaa_marine_get_currents` | CO-OPS tidal-current predictions: max flood, max ebb, and slack events, or a 6-minute curve |
-| `noaa_marine_get_conditions` | Live NDBC buoy conditions: waves, wind, sea-surface and air temperature, pressure |
+| `noaa_marine_get_currents` | CO-OPS tidal-current predictions: max flood, max ebb, and slack events, or a 6-minute harmonic curve |
+| `noaa_marine_get_conditions` | Latest NDBC buoy conditions: waves, wind, sea-surface and air temperature, pressure |
 | `noaa_marine_get_current_profile` | Observed ocean-current depth profile from an NDBC ADCP buoy |
 | `noaa_marine_get_ocean_observations` | Sub-surface water-column readings (temperature, salinity, oxygen, and more) from an NDBC station |
 
@@ -62,7 +62,7 @@ The published [noaa-marine-guide](./skills/noaa-marine-guide/SKILL.md) skill car
 
 - Filters combine: `latitude` + `longitude` with `radius_km` (default 100, max 1000), `query` (name or ID substring on both sources; an exact ID leads unless sorting by distance), `state` (CO-OPS only), `source` (`coops` / `ndbc` / `all`), and `types` (`tide`, `current`, `water_level`, `met`, `current_profile`, `water_quality`, or the platform class `buoy`); `limit` defaults to 20, and a larger value is clamped to 200 with a notice (rejected when `NOAA_CLAMP_LIMITS=false`); `offset` pages past one page
 - Each station carries `source`, `capabilities`, `type`, and for NDBC a `platform`; CO-OPS rows add `state` (`state_derived: true` when borrowed from the nearest state-bearing station within 25 km), a tide `prediction_class` (`reference`, or `subordinate` with `reference_id`), and current `bins[]` giving each bin's number, depth in feet, and class
-- `total_found` counts every match across pages; `truncated` and `next_offset` appear while matches remain past the page; zero matches is a success with `applied_search`, a partial catalog read is flagged in `sources`, and total catalog failure is `sources_unavailable`; only one of `latitude`/`longitude` is `incomplete_coordinates`
+- `total_found` counts every match across pages; `truncated` and `next_offset` appear while matches remain past the page; zero matches is a success with `applied_search`, and the notice distinguishes a name/ID miss in the catalogs read from matches excluded by other filters. `sources` flags partial catalog reads. Total catalog failure is `sources_unavailable`. Supplying just `latitude` or `longitude` is `incomplete_coordinates`
 
 ---
 
@@ -76,15 +76,15 @@ The published [noaa-marine-guide](./skills/noaa-marine-guide/SKILL.md) skill car
 
 ### `noaa_marine_get_water_level` <sub>tool</sub>
 
-- `interval` `6min` (default, 31 days), `hourly` or `high_low` (365 days), or `daily_mean` (3,655 days, Great Lakes only, always in LST; a coastal station is `great_lakes_only`); thirteen datums (MLLW, MHHW, MHW, MTL, MSL, MLW, NAVD, STND, IGLD, LWD, CRD, LWI, HWI)
+- `interval` `6min` (default, 31 days), `hourly` or `high_low` (365 days), or `daily_mean` (3,655 days, Great Lakes only, always in LST; a coastal station is `great_lakes_only`); eleven datums (MLLW, MHHW, MHW, MTL, MSL, MLW, NAVD, STND, IGLD, LWD, CRD)
 - Observations carry `quality` (`p` / `v`, `6min` only), `sigma` (`6min` and `hourly`), and `type` (`H` / `HH` / `L` / `LL`, `high_low` only); slots with no reading are dropped and counted in `gaps_dropped`
-- Paired predictions at the matching cadence (none on `daily_mean`), with `predictions_status` (`empty` / `unavailable`) explaining an empty series; `residual_summary` (`max_surge`, `max_drawdown`) covers the whole matched range, on `6min` and `hourly` only. Failures: `invalid_date_range`, `date_range_exceeded`, `station_not_found`, `datum_unavailable`, `no_gauge`, `future_window` (`begin_date` after the station's current date in the requested `time_zone`), `no_data`, `verified_data_lag` (a coarser-cadence window ending on or after the first day of the prior month, which CO-OPS may not have verified yet), and `upstream_throttled`
+- Paired predictions at the matching cadence (none on `daily_mean`), with `predictions_status` (`empty` / `unavailable`) explaining an empty series; `observed_extremes` reports `max` and `min` with times across the whole matched range, including daily averages on `daily_mean`. On `6min` and `hourly`, `residual_summary` reports `max_surge` and `max_drawdown` across all matched observed/predicted pairs, with `max_surge_at` and `max_drawdown_at` when the respective sign occurs. Failures: `invalid_date_range`, `date_range_exceeded`, `station_not_found`, `datum_unavailable`, `no_gauge`, `future_window` (`begin_date` after the station's current date in the requested `time_zone`), `no_data`, `verified_data_lag` (a coarser-cadence window ending on or after the first day of the prior month, which CO-OPS may not have verified yet), and `upstream_throttled`
 
 ---
 
 ### `noaa_marine_get_monthly_means` <sub>tool</sub>
 
-- Up to 73,000 days per request; eleven datums (MLLW, MHHW, MHW, MTL, MSL, MLW, NAVD, STND, IGLD, LWD, CRD) in `english` feet or `metric` meters; the first and last months returned are those `begin_date` and `end_date` fall in
+- Up to 73,000 days per request; eleven datums (MLLW, MHHW, MHW, MTL, MSL, MLW, NAVD, STND, IGLD, LWD, CRD) in `english` feet or `metric` meters; returned months fall within the inclusive local calendar months of `begin_date` and `end_date`
 - One row per month: `highest`, `lowest`, the tidal datums (`mhhw`, `mhw`, `msl`, `mtl`, `mlw`, `mllw`, `dtl`), ranges (`gt`, `mn`, `dhq`, `dlq`), lunitidal intervals in hours (`hwi`, `lwi`), and the `inferred` code verbatim; values CO-OPS leaves blank are omitted, so a Great Lakes station carries only `highest`, `msl`, and `lowest`
 - Failures: `invalid_date_range`, `date_range_exceeded`, `station_not_found`, `datum_unavailable`, `no_gauge`, `upstream_throttled`, and for an empty window `verified_data_lag` when it ends on or after the first day of the prior month, `no_data` otherwise
 
@@ -92,8 +92,8 @@ The published [noaa-marine-guide](./skills/noaa-marine-guide/SKILL.md) skill car
 
 ### `noaa_marine_get_currents` <sub>tool</sub>
 
-- `interval` `MAX_SLACK` (default: max flood, max ebb, and slack events) or `6min`, up to 365 days; `bin` picks a depth bin from `bins[]` (default the shallowest); `units` `english` (knots, feet) or `metric` (cm/s, meters)
-- Every response echoes `bin` and `depth`; rows carry a `flood` / `ebb` / `slack` `type`, a non-negative `speed`, and as `direction` the station's mean bearing for that flow
+- `interval` `MAX_SLACK` (default, up to 365 days) or `6min` (up to 31 days); `bin` picks a depth bin from `bins[]` (CO-OPS chooses the default when omitted); `units` `english` (knots, feet) or `metric` (cm/s, meters)
+- For `6min`, harmonic bins return the curve in `predictions[]`. When CO-OPS answers with max flood, max ebb, and slack events, they appear in `events[]` with `predictions: []` and a notice. Every response echoes `bin` and `depth`; rows carry a `flood` / `ebb` / `slack` `type`, a non-negative `speed`, and as `direction` the station's mean bearing for that flow
 - A bin the station lacks is `bin_unavailable` listing the ones it has; a station CO-OPS won't predict as events returns an empty list with its statement in `notice`, and one with no published predictions is `predictions_unavailable`; also `invalid_date_range`, `date_range_exceeded`, `station_not_found`, `no_predictions`, and `upstream_throttled`
 
 ---
@@ -115,7 +115,7 @@ The published [noaa-marine-guide](./skills/noaa-marine-guide/SKILL.md) skill car
 
 ### `noaa_marine_get_ocean_observations` <sub>tool</sub>
 
-- One NDBC `station_id`, found with `types: ["water_quality"]`, a catalog flag rather than a guarantee; `readings[]` holds one row per depth with temperature, conductivity, salinity, dissolved oxygen (% and ppm), chlorophyll, turbidity, pH, and redox potential
+- One NDBC `station_id`, found with the catalog filter `types: ["water_quality"]`; `readings[]` holds one row per depth with temperature, conductivity, salinity, dissolved oxygen (% and ppm), chlorophyll, turbidity, pH, and redox potential
 - Most stations report only temperature and salinity, and unreported values are `null`; failures are `observations_not_found` (no `.ocean` file) and `no_ocean_data`
 
 ---
@@ -133,14 +133,14 @@ CO-OPS / NDBC-specific:
 
 - CO-OPS data and metadata APIs plus the NDBC active-stations catalog and `realtime2` feeds (`.txt`, `.adcp`, `.ocean`), with station catalogs cached in memory for 6 hours; CO-OPS requests carry `application=` from `NOAA_APPLICATION_ID`
 - Station IDs belong to one source, with one exception: CO-OPS tide and water-level IDs are numeric (`9447130`), CO-OPS current IDs alphanumeric (`ACT4176`), NDBC IDs mostly 5-character codes (`46041`) with some 7-digit numbers, and only `noaa_marine_get_conditions` reads a CO-OPS ID, through its NDBC relay
-- CO-OPS tools take `begin_date` / `end_date` as `YYYYMMDD` or `YYYY-MM-DD` and check the calendar and each tool's range ceiling before calling (`invalid_date_range`, `date_range_exceeded`); heights default to MLLW, a datum a station lacks is `datum_unavailable` with a hint naming a datum to retry with, never the rejected one, and a station that has never had a water-level gauge is `no_gauge`
-- CO-OPS verifies `hourly`, `high_low`, `daily_mean`, and monthly means once a month, for the prior month: an empty window ending on or after the first of the prior month is `verified_data_lag`, an earlier one `no_data`
+- CO-OPS tools take `begin_date` / `end_date` as `YYYYMMDD` or `YYYY-MM-DD` and check the calendar and each tool's range ceiling before calling (`invalid_date_range`, `date_range_exceeded`); heights default to MLLW, a datum a station lacks is `datum_unavailable` with a hint naming a datum to retry with, never the rejected one, and a datum failure at a station that has never had a water-level gauge is `no_gauge`. When a water-level or monthly-mean request fails for a window entirely after a confirmed gauge retirement, `no_data` names the removal date and points to nearby gauges
+- CO-OPS verifies `hourly`, `high_low`, `daily_mean`, and monthly means once a month, for the prior month. When a recent `hourly`, `daily_mean`, or monthly series ends early, `notice` names the last available observation or month and says later data may still await verification
 - CO-OPS answers a burst of requests with HTTP 403 for about two minutes; the CO-OPS data tools report it as a retryable `upstream_throttled` whose recovery names the wait
 
 Agent-friendly output:
 
 - Count paging on the four CO-OPS series tools: a page is `limit` rows from `offset`, defaulting to 50 (24 for monthly means) with a larger value clamped to 1,000 and a notice; a range of at most `limit` rows returns whole, and a longer one adds `rows_matched`, `rows_returned`, `page_offset`, and `next_offset`
-- Missing means `null` or omitted, never fabricated: NDBC `MM` markers become `null`, blank CO-OPS values are dropped, and `quality` is left out rather than defaulted
+- All three NDBC data tools report `observed_at` and `observation_age_minutes` (signed elapsed minutes rounded down), and add a notice when the reading is over three hours old. NDBC capability filters identify candidate stations, and the selected feed may be unavailable. Missing means `null` or omitted, never fabricated: NDBC `MM` markers become `null`, blank CO-OPS values are dropped, and `quality` is left out rather than defaulted
 - Discriminated fields: station `source` (`coops` | `ndbc`), capability `type`, NDBC `platform`, and `prediction_class`, with datum and units echoed on every CO-OPS height response, so callers branch on data, not string parsing
 
 ## Getting started
@@ -184,7 +184,7 @@ No API key: NOAA CO-OPS and NDBC are open data sources. For Docker or a source b
 | `MCP_SESSION_MODE` | HTTP session mode: `stateless`, `stateful`, or `auto`. | `stateless` |
 | `MCP_AUTH_MODE` | Authentication: `none`, `jwt`, or `oauth`. | `none` |
 | `MCP_LOG_LEVEL` | Log level (`debug`, `info`, `warning`, `error`, etc.). | `info` |
-| `LOGS_DIR` | Directory for log files (Node.js only). | `<project-root>/logs` |
+| `LOGS_DIR` | Directory for log files (Node.js only). Relative paths resolve from the server package root. | `<server-package-root>/logs` |
 | `LOG_TOOL_FAILURE_PAYLOADS` | Log each failed tool call's arguments and result (redacted by key name only), capped by `LOG_TOOL_FAILURE_PAYLOAD_MAX_BYTES`. | `false` |
 | `OTEL_ENABLED` | Enable [OpenTelemetry](https://github.com/cyanheads/mcp-ts-core/tree/main/docs/telemetry). | `false` |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP base URL; traces and metrics export to `/v1/traces` and `/v1/metrics` under it. | — |
@@ -196,7 +196,7 @@ See [`.env.example`](./.env.example) for the full list of optional overrides.
 
 ### Local development
 
-Requires [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+).
+Requires [Bun v1.4.4](https://bun.sh/) or higher (or Node.js v24+).
 
 - **Clone and install:**
 

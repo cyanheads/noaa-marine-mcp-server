@@ -100,6 +100,39 @@ describe('noaaMarineGetOceanObservations', () => {
     expect(result.readings[1]!.oxygen_percent).toBeNull();
   });
 
+  it.each([
+    { now: '2026-07-16T09:45:00Z', age: 15, stale: false },
+    { now: '2026-07-17T09:30:00Z', age: 1440, stale: true },
+  ])('reports the ocean observation age at $now on both surfaces', async ({ now, age, stale }) => {
+    vi.spyOn(Date, 'now').mockReturnValue(Date.parse(now));
+    const { getNdbcService } = await import('@/services/ndbc/ndbc-service.js');
+    const svc = getNdbcService();
+    vi.spyOn(svc, 'getActiveStations').mockResolvedValue([NDBC_STATION]);
+    vi.spyOn(svc, 'fetchOceanObservations').mockResolvedValue(OCEAN_OBS);
+
+    const result = await runToolContract(noaaMarineGetOceanObservations, { station_id: 'TIBC1' });
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      observation_age_minutes: age,
+      observed_at: '2026-07-16T09:30:00Z',
+      readings: expect.arrayContaining([
+        expect.objectContaining({ depth_m: 0, water_temp_c: 15.68 }),
+      ]),
+    });
+    const text = result.content
+      .map((block) => (block.type === 'text' ? block.text : ''))
+      .join('\n');
+    expect(text).toContain(`**Observation age:** ${age} minutes`);
+    const notice = (result.structuredContent as Record<string, unknown>).notice;
+    if (stale) {
+      expect(notice).toEqual(expect.stringContaining('types=["water_quality"]'));
+      expect(text).toContain(String(notice));
+    } else {
+      expect(notice).toBeUndefined();
+      expect(text).not.toContain('may have stopped reporting');
+    }
+  });
+
   it('throws ctx.fail("observations_not_found") on a bare 404 (no .ocean file)', async () => {
     const ctx = createMockContext({ errors: noaaMarineGetOceanObservations.errors });
 
@@ -250,6 +283,7 @@ describe('noaaMarineGetOceanObservations', () => {
       latitude: 37.892,
       longitude: -122.447,
       observed_at: '2026-07-16T09:30:00Z',
+      observation_age_minutes: 0,
       source: 'ndbc',
       reading_count: 1,
       readings: [

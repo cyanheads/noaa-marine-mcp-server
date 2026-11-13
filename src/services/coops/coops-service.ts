@@ -3,7 +3,7 @@
  * @module services/coops/coops-service
  */
 
-import type { Context } from '@cyanheads/mcp-ts-core';
+import { type Context, z } from '@cyanheads/mcp-ts-core';
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
 import {
   JsonRpcErrorCode,
@@ -14,6 +14,7 @@ import {
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import { fetchWithTimeout, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import type { ServerConfig } from '@/config/server-config.js';
+import { validateCoopsDateRange } from './date-range.js';
 import { type CoopsCatalogs, resolveStationStates, type StationState } from './station-state.js';
 import type {
   CoopsCurrent6MinRow,
@@ -31,6 +32,7 @@ import type {
  * The failure CO-OPS described, decoded from its message text.
  *
  *   'bin_unavailable'            — the station does not publish the requested depth bin
+ *   'date_range_exceeded'        — the range exceeds the product's retrieval limit
  *   'datum_unavailable'          — the station or product does not carry the requested datum
  *   'great_lakes_no_predictions' — a Great Lakes station, which has no prediction series at all
  *   'great_lakes_only'           — the product is served at Great Lakes stations only
@@ -42,6 +44,7 @@ import type {
  */
 export type CoopsReason =
   | 'bin_unavailable'
+  | 'date_range_exceeded'
   | 'datum_unavailable'
   | 'great_lakes_no_predictions'
   | 'great_lakes_only'
@@ -60,11 +63,13 @@ export class CoopsBodyError extends McpError {
   /** Bin numbers CO-OPS named in an `Available bin number of …` rejection, in its order. */
   readonly availableBins?: number[];
   readonly coopsReason: CoopsReason;
+  /** Maximum date span in days, when CO-OPS states it in a range rejection. */
+  readonly maxDays?: number;
 
   constructor(
     coopsReason: CoopsReason,
     message: string,
-    options?: { availableBins?: number[]; cause?: unknown },
+    options?: { availableBins?: number[]; cause?: unknown; maxDays?: number },
   ) {
     // retryable: false — deterministic domain errors should not be retried.
     super(
@@ -74,11 +79,13 @@ export class CoopsBodyError extends McpError {
         coopsReason,
         retryable: false,
         ...(options?.availableBins ? { availableBins: options.availableBins } : {}),
+        ...(options?.maxDays !== undefined ? { maxDays: options.maxDays } : {}),
       },
       options?.cause !== undefined ? { cause: options.cause } : undefined,
     );
     this.coopsReason = coopsReason;
     if (options?.availableBins) this.availableBins = options.availableBins;
+    if (options?.maxDays !== undefined) this.maxDays = options.maxDays;
   }
 }
 
@@ -95,6 +102,10 @@ export function isCoopsBodyError(
 
 /** Pulls the bin list out of `Available bin number of PUG1515: 15, 10, 1, `. */
 const BIN_LIST_PATTERN = /available bin number of\s+\S+?\s*:\s*([\d,\s]*)/i;
+
+/** CO-OPS's reported day limit follows this fixed phrase in a range rejection. */
+const RANGE_LIMIT_DAYS_PATTERN =
+  /the size limit for data retrieval for this product is (\d+) days?\b/i;
 
 /**
  * Matches `There is no MLLW for the station: 9087044` and its `There is no CRD Offset for the
@@ -117,8 +128,16 @@ const DATUM_MISSING_PATTERN =
 function classifyCoopsMessage(
   message: string,
   requestedDatum?: string,
-): { availableBins?: number[]; reason: CoopsReason } | undefined {
+): { availableBins?: number[]; maxDays?: number; reason: CoopsReason } | undefined {
   const lower = message.toLowerCase();
+
+  if (lower.includes('range limit exceeded')) {
+    const maxDays = Number(RANGE_LIMIT_DAYS_PATTERN.exec(message)?.[1]);
+    return {
+      reason: 'date_range_exceeded',
+      ...(Number.isSafeInteger(maxDays) && maxDays > 0 ? { maxDays } : {}),
+    };
+  }
 
   const binMatch = BIN_LIST_PATTERN.exec(message);
   if (binMatch?.[1] !== undefined) {
@@ -240,7 +259,8 @@ export function isCoopsThrottled(err: unknown): boolean {
 }
 
 const DATA_URL = 'https://api.tidesandcurrents.noaa.gov/api/prod/datagetter';
-const MDAPI_URL = 'https://api.tidesandcurrents.noaa.gov/mdapi/prod/webapi/stations.json';
+const MDAPI_STATIONS = 'https://api.tidesandcurrents.noaa.gov/mdapi/prod/webapi/stations';
+const stationDetails = z.object({ id: z.string(), removed: z.string() });
 const CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
 
 /**
@@ -261,16 +281,18 @@ interface CacheEntry {
 }
 
 /**
- * What the water-level catalogs say about a station's gauge, for a datum rejection's recovery.
+ * What the water-level catalogs and station details say about a failed observation request.
  *
  *   'gauge'    — listed in `waterlevels` or `historicwl`; `station` is that row, whose `greatlakes`
  *                flag decides which datums read it
+ *   'retired'  — station details give a removal date, with a catalog row when available
  *   'no_gauge' — in neither, so it has never had one; `tideStation` is its `tidepredictions` row
  *                when that catalog lists it
  *   'unknown'  — a catalog the answer depends on could not be read
  */
 export type GaugeLookup =
   | { kind: 'gauge'; station: CoopsStation }
+  | { kind: 'retired'; removedDate: string; station?: CoopsStation }
   | { kind: 'no_gauge'; tideStation?: CoopsStation }
   | { kind: 'unknown' };
 
@@ -325,6 +347,15 @@ export function noGaugeHint(stationId: string, tideStation: CoopsStation | undef
   return `Find a water-level station nearby with noaa_marine_find_stations, latitude ${tideStation.lat}, longitude ${tideStation.lng}, and types=["water_level"]. For the predicted tide at station ${stationId}, call noaa_marine_get_tide_predictions with that station_id.`;
 }
 
+/** Nearby active-gauge recovery after the requested period starts beyond the removal date. */
+export function retiredGaugeHint(station: CoopsStation | undefined): string {
+  const coordinates =
+    Number.isFinite(station?.lat) && Number.isFinite(station?.lng) && station
+      ? `, latitude ${station.lat}, longitude ${station.lng},`
+      : '';
+  return `Find a nearby active gauge with noaa_marine_find_stations${coordinates} and types=["water_level"].`;
+}
+
 export class CoopsService {
   private readonly applicationId: string;
   private readonly stationCache = new Map<CoopsStationType, CacheEntry>();
@@ -356,7 +387,7 @@ export class CoopsService {
 
     const stations = await withRetry(
       async () => {
-        const url = `${MDAPI_URL}?type=${type}&application=${encodeURIComponent(this.applicationId)}`;
+        const url = `${MDAPI_STATIONS}.json?type=${type}&application=${encodeURIComponent(this.applicationId)}`;
         const response = await fetchWithTimeout(url, 15_000, ctx, { signal });
         const text = await response.text();
         this.detectHtmlError(text);
@@ -401,20 +432,62 @@ export class CoopsService {
   }
 
   /**
-   * Whether a station whose datum CO-OPS just rejected has a water-level gauge at all. Reads
-   * `historicwl` only for a station absent from `waterlevels`, and `tidepredictions` only for one
-   * absent from both — so a station listed as an active gauge costs no extra catalog — under one
-   * deadline shared by all three reads.
+   * Best-effort recovery lookup under one deadline. An active gauge needs only the active
+   * catalog. An inactive station may have a removal date in its details. A datum failure also
+   * distinguishes stations that never had a gauge.
    */
-  async lookupGauge(stationId: string, ctx: Context): Promise<GaugeLookup> {
+  async lookupGauge(
+    stationId: string,
+    ctx: Context,
+    purpose: 'datum' | 'retirement' = 'datum',
+  ): Promise<GaugeLookup> {
     const deadline = lookupDeadline(ctx);
-    for (const type of ['waterlevels', 'historicwl'] as const) {
-      const station = await this.findStation(type, stationId, ctx, deadline);
-      if (station === undefined) return { kind: 'unknown' };
-      if (station) return { kind: 'gauge', station };
+    const active = await this.findStation('waterlevels', stationId, ctx, deadline);
+    if (active === undefined) return { kind: 'unknown' };
+    if (active) return { kind: 'gauge', station: active };
+
+    const historic = await this.findStation('historicwl', stationId, ctx, deadline);
+    // Preserve the existing datum recovery before spending the remaining budget on details.
+    const needsTideRecovery = historic === null && purpose === 'datum';
+    const tideStation = needsTideRecovery
+      ? await this.findStation('tidepredictions', stationId, ctx, deadline)
+      : undefined;
+    const removedDate = await this.gaugeRemovalDate(stationId, ctx, deadline);
+    if (removedDate) {
+      const station =
+        historic ??
+        (needsTideRecovery
+          ? tideStation
+          : await this.findStation('tidepredictions', stationId, ctx, deadline));
+      return { kind: 'retired', removedDate, ...(station ? { station } : {}) };
     }
-    const tideStation = await this.findStation('tidepredictions', stationId, ctx, deadline);
+    if (historic) return { kind: 'gauge', station: historic };
+    if (historic === undefined || purpose === 'retirement') return { kind: 'unknown' };
     return tideStation ? { kind: 'no_gauge', tideStation } : { kind: 'no_gauge' };
+  }
+
+  /** One best-effort details request, within the same deadline as the catalog reads. */
+  private async gaugeRemovalDate(
+    stationId: string,
+    ctx: Context,
+    signal: AbortSignal,
+  ): Promise<string | undefined> {
+    try {
+      signal.throwIfAborted();
+      const url = `${MDAPI_STATIONS}/${encodeURIComponent(stationId)}/details.json`;
+      const response = await fetchWithTimeout(url, CATALOG_LOOKUP_BUDGET_MS, ctx, { signal });
+      const details = stationDetails.safeParse(await response.json());
+      signal.throwIfAborted();
+      if (!details.success || details.data.id !== stationId) return;
+      const removed = details.data.removed;
+      if (removed.length !== 19 || removed[10] !== ' ') return;
+      const date = removed.slice(0, 10);
+      if (!/^(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d$/.test(removed.slice(11))) return;
+      if (validateCoopsDateRange(date, date).ok) return date;
+    } catch (err) {
+      if (ctx.signal.aborted) throw err;
+    }
+    return undefined;
   }
 
   /**
@@ -659,7 +732,7 @@ export class CoopsService {
       time_zone: string;
       units: string;
       interval: string;
-      /** Depth bin to predict for. Omitted lets CO-OPS pick its default, the shallowest bin. */
+      /** Depth bin to predict for. Omitted lets CO-OPS pick its default. */
       bin?: number;
     },
     ctx: Context,
@@ -699,11 +772,14 @@ export class CoopsService {
         // CO-OPS puts a string where the array belongs when it will not predict discrete
         // events for the station. Carry the sentence through — it is the answer.
         const rawCp = parsed.current_predictions?.cp;
-        const cp: CoopsCurrentRow[] | CoopsCurrent6MinRow[] = Array.isArray(rawCp) ? rawCp : [];
+        const cp: (CoopsCurrentRow | CoopsCurrent6MinRow)[] = Array.isArray(rawCp) ? rawCp : [];
         const statement = typeof rawCp === 'string' ? rawCp : undefined;
         const stationName: string = parsed.metadata?.name ?? params.station;
         const shared = { ...(statement !== undefined ? { statement } : {}), stationName };
-        if (params.interval === 'MAX_SLACK') {
+        // A subordinate bin answers a 6-minute request with the same event series as
+        // MAX_SLACK. CO-OPS supplies Type on each event and omits it on continuous rows.
+        const first = cp[0];
+        if (params.interval === 'MAX_SLACK' || (first && 'Type' in first)) {
           return { events: cp as CoopsCurrentRow[], ...shared };
         }
         return { predictions: cp as CoopsCurrent6MinRow[], ...shared };
@@ -743,9 +819,7 @@ export class CoopsService {
     // Deterministic domain errors — map to typed reasons; no retry warranted.
     const classified = classifyCoopsMessage(message, requestedDatum);
     if (classified) {
-      throw new CoopsBodyError(classified.reason, `CO-OPS error: ${message}`, {
-        ...(classified.availableBins ? { availableBins: classified.availableBins } : {}),
-      });
+      throw new CoopsBodyError(classified.reason, `CO-OPS error: ${message}`, classified);
     }
 
     // Unknown CO-OPS error — generic ServiceUnavailable.
@@ -770,8 +844,8 @@ export class CoopsService {
       const classified = classifyCoopsMessage(message, requestedDatum);
       if (classified) {
         throw new CoopsBodyError(classified.reason, `CO-OPS error: ${message}`, {
+          ...classified,
           cause: err,
-          ...(classified.availableBins ? { availableBins: classified.availableBins } : {}),
         });
       }
     }

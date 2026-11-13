@@ -4,7 +4,7 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { noaaMarineGetCurrentProfile } from '@/mcp-server/tools/definitions/noaa-marine-get-current-profile.tool.js';
 import { initNdbcService } from '@/services/ndbc/ndbc-service.js';
@@ -61,6 +61,37 @@ describe('noaaMarineGetCurrentProfile', () => {
     expect(result.bins[0]).toEqual({ depth_m: 2, direction_deg: 210, speed_cm_s: 19 });
     // Missing components stay null — never fabricated to 0.
     expect(result.bins[2]).toEqual({ depth_m: 6, direction_deg: null, speed_cm_s: null });
+  });
+
+  it.each([
+    { now: '2026-07-16T02:59:59Z', age: 179, stale: false },
+    { now: '2026-07-17T00:00:00Z', age: 1440, stale: true },
+  ])('reports the profile age at $now on both surfaces', async ({ now, age, stale }) => {
+    vi.spyOn(Date, 'now').mockReturnValue(Date.parse(now));
+    const { getNdbcService } = await import('@/services/ndbc/ndbc-service.js');
+    const svc = getNdbcService();
+    vi.spyOn(svc, 'getActiveStations').mockResolvedValue([NDBC_STATION]);
+    vi.spyOn(svc, 'fetchCurrentProfile').mockResolvedValue(FULL_PROFILE);
+
+    const result = await runToolContract(noaaMarineGetCurrentProfile, { station_id: '44033' });
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      observation_age_minutes: age,
+      observed_at: '2026-07-16T00:00:00Z',
+      bins: expect.arrayContaining([{ depth_m: 2, direction_deg: 210, speed_cm_s: 19 }]),
+    });
+    const text = result.content
+      .map((block) => (block.type === 'text' ? block.text : ''))
+      .join('\n');
+    expect(text).toContain(`**Observation age:** ${age} minutes`);
+    const notice = (result.structuredContent as Record<string, unknown>).notice;
+    if (stale) {
+      expect(notice).toEqual(expect.stringContaining('types=["current_profile"]'));
+      expect(text).toContain(String(notice));
+    } else {
+      expect(notice).toBeUndefined();
+      expect(text).not.toContain('may have stopped reporting');
+    }
   });
 
   it('throws ctx.fail("profile_not_found") on a bare 404 (no ADCP file)', async () => {
@@ -158,6 +189,7 @@ describe('noaaMarineGetCurrentProfile', () => {
       latitude: 44.05,
       longitude: -68.11,
       observed_at: '2026-07-16T00:00:00Z',
+      observation_age_minutes: 0,
       source: 'ndbc',
       bin_count: 2,
       bins: [

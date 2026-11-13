@@ -7,10 +7,11 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { getNdbcService } from '@/services/ndbc/ndbc-service.js';
+import { getObservationAge } from '@/services/ndbc/observation-age.js';
 
 export const noaaMarineGetCurrentProfile = tool('noaa_marine_get_current_profile', {
   title: 'Get Ocean Current Profile',
-  description: `Observed ocean-current depth profile from an NDBC ADCP buoy — the most recent measurement of current speed and direction at each depth bin, returning depth in meters, direction in degrees true (the direction the current flows toward), and speed in cm/s. It is distinct from noaa_marine_get_currents, which returns CO-OPS tidal-current predictions of max flood, ebb and slack rather than these observed acoustic-Doppler measurements. A depth bin is reported whenever NDBC gives it a depth, and its direction or speed is null when the sensor did not report that component. Use noaa_marine_find_stations with source="ndbc" and types=["current_profile"] to find station IDs, since most NDBC stations serve no ADCP profile and an unfiltered search returns IDs this tool cannot read.`,
+  description: `Observed ocean-current depth profile from an NDBC ADCP buoy — the most recent measurement of current speed and direction at each depth bin, returning depth in meters, direction in degrees true (the direction the current flows toward), and speed in cm/s. It is distinct from noaa_marine_get_currents, which returns CO-OPS tidal-current predictions of max flood, ebb and slack rather than these observed acoustic-Doppler measurements. A depth bin is reported whenever NDBC gives it a depth, and its direction or speed is null when the sensor did not report that component. Use noaa_marine_find_stations with source="ndbc" and types=["current_profile"] to find station IDs, since most NDBC stations serve no ADCP profile and an unfiltered search returns IDs this tool cannot read. The response includes observation_age_minutes and a notice when the latest observation is more than 180 minutes old.`,
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   input: z.object({
@@ -42,6 +43,12 @@ export const noaaMarineGetCurrentProfile = tool('noaa_marine_get_current_profile
       .describe(
         'ISO 8601 UTC timestamp of the observation. Always a valid instant — a row whose upstream time columns are malformed is rejected rather than timestamped with the current time.',
       ),
+    observation_age_minutes: z
+      .number()
+      .int()
+      .describe(
+        'Elapsed minutes from observed_at to response time, rounded down. Negative for a future timestamp.',
+      ),
     source: z.string().describe('Data source — always "ndbc" for this tool.'),
     bin_count: z.number().describe('Number of depth bins in the profile.'),
     bins: z
@@ -64,6 +71,15 @@ export const noaaMarineGetCurrentProfile = tool('noaa_marine_get_current_profile
       )
       .describe('Depth-binned current measurements, shallowest first (NDBC source order).'),
   }),
+
+  enrichment: {
+    notice: z
+      .string()
+      .optional()
+      .describe(
+        'Observation age and station discovery guidance when the latest observation is more than 180 minutes old.',
+      ),
+  },
 
   errors: [
     {
@@ -114,6 +130,9 @@ export const noaaMarineGetCurrentProfile = tool('noaa_marine_get_current_profile
       throw err;
     }
 
+    const age = getObservationAge(profile.observedAt, 'current_profile');
+    if (age.notice !== undefined) ctx.enrich.notice(age.notice);
+
     ctx.log.info('NDBC current profile fetched', {
       station_id: input.station_id,
       observed_at: profile.observedAt,
@@ -126,6 +145,7 @@ export const noaaMarineGetCurrentProfile = tool('noaa_marine_get_current_profile
       latitude: meta?.lat ?? null,
       longitude: meta?.lon ?? null,
       observed_at: profile.observedAt,
+      observation_age_minutes: age.minutes,
       source: 'ndbc',
       bin_count: profile.bins.length,
       bins: profile.bins.map((b) => ({
@@ -139,7 +159,7 @@ export const noaaMarineGetCurrentProfile = tool('noaa_marine_get_current_profile
   format: (result) => {
     const lines: string[] = [
       `## Ocean Current Profile — ${escapeMarkdownInline(result.station_name)} (${escapeMarkdownInline(result.station_id)})`,
-      `**Observed at:** ${result.observed_at} · **Source:** ${result.source} · **Bins:** ${result.bin_count}`,
+      `**Observed at:** ${result.observed_at} · **Observation age:** ${result.observation_age_minutes} minutes · **Source:** ${result.source} · **Bins:** ${result.bin_count}`,
       `**Location:** ${result.latitude ?? 'unknown'}, ${result.longitude ?? 'unknown'}`,
       '',
       '| Depth (m) | Direction (°T) | Speed (cm/s) |',

@@ -56,7 +56,7 @@ function meanBearing(row: CoopsCurrent6MinRow | CoopsCurrentRow, sense: FlowSens
 
 export const noaaMarineGetCurrents = tool('noaa_marine_get_currents', {
   title: 'Get Tidal Currents',
-  description: `Tidal current predictions for a CO-OPS current station: max flood and ebb speeds, slack times, and the station's mean flood and ebb bearings. These are forecast predictions from CO-OPS, distinct from noaa_marine_get_current_profile, which returns NDBC observed ocean-current measurements binned by depth. The default MAX_SLACK interval is the practical planning view, showing when currents peak and when slack water occurs, and a 6-minute interval returns the continuous curve for detailed analysis, each row carrying its own flood/ebb/slack sense. A station can publish predictions for several depth bins at different depths: bin selects one, omitting it takes the CO-OPS default of the shallowest bin, and the bin and its depth are echoed on every response — read bins[] on a noaa_marine_find_stations current row for the bins a station actually has. A station whose currents CO-OPS will not predict as discrete events answers with an empty list and its own wording in the notice rather than an error. Both intervals page by row count: each call returns up to limit rows of whichever series the interval selects, starting at offset, and a range that matched more reports rows_matched, rows_returned, and next_offset — how much matched and which offset reaches the rest. Current station IDs are alphanumeric (e.g. ACT4176), distinct from the numeric tide and water-level IDs, and the date range is limited to 1 year per request — use noaa_marine_find_stations with types=["current"] to obtain a valid current station ID.`,
+  description: `Tidal current predictions for a CO-OPS current station: max flood and ebb speeds, slack times, and mean flood and ebb bearings. For observed NDBC ocean-current measurements by depth, use noaa_marine_get_current_profile. MAX_SLACK (default, up to 365 days) returns peak and slack events for passage planning. 6min (up to 31 days) returns a continuous curve for a harmonic bin. A subordinate bin returns max/slack events with a notice and empty predictions. Select a depth bin from bins[] on a noaa_marine_find_stations current row, or let CO-OPS choose its default. The response echoes the answered bin and depth. When CO-OPS returns a statement about weak and variable currents, the notice carries its wording and the requested series is empty. Both intervals page the returned series by row count from offset, up to limit. A partial page reports rows_matched, rows_returned, and next_offset. Use noaa_marine_find_stations with types=["current"] for alphanumeric current station IDs such as ACT4176.`,
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
@@ -90,21 +90,21 @@ export const noaaMarineGetCurrents = tool('noaa_marine_get_currents', {
       .enum(['MAX_SLACK', '6min'])
       .default('MAX_SLACK')
       .describe(
-        'Prediction interval: MAX_SLACK (default) returns max flood, max ebb, and slack water events — ideal for passage planning. 6min returns a continuous current curve.',
+        'MAX_SLACK (default, up to 365 days) returns max flood, max ebb, and slack events. 6min (up to 31 days) returns a continuous curve for harmonic bins and max/slack events for subordinate bins.',
       ),
     bin: z
       .number()
       .int()
       .optional()
       .describe(
-        'Depth bin to predict for, taken from the bins[] array on a noaa_marine_find_stations current row (e.g. 15, 10 or 1 at PUG1515). Omit to take the CO-OPS default, which is the shallowest bin. A bin the station does not publish comes back as bin_unavailable naming the bins it does.',
+        'Depth bin to predict for, taken from the bins[] array on a noaa_marine_find_stations current row (e.g. 15, 10 or 1 at PUG1515). Omit to let CO-OPS choose its default. A bin the station does not publish comes back as bin_unavailable naming the bins it does.',
       ),
     offset: offsetSchema(
-      'Row offset into the matched prediction series — the max/slack events on the MAX_SLACK interval, the 6-minute curve on 6min — for reading a range longer than one page. 0 (default) starts at the first row; pass the next_offset from a previous call to continue. An offset past the last row returns an empty page rather than an error.',
+      'Row offset into the returned series, whether max/slack events or a 6-minute curve. 0 (default) starts at the first row; pass next_offset from a previous call to continue. An offset past the last row returns an empty page.',
     ),
     limit: limitSchema(
       'noaa_marine_get_currents',
-      'Prediction rows to return on this page — max/slack events or 6-minute rows, whichever the interval selects.',
+      'Rows to return on this page from the series CO-OPS returned, either max/slack events or 6-minute rows.',
     ),
   }),
 
@@ -120,7 +120,7 @@ export const noaaMarineGetCurrents = tool('noaa_marine_get_currents', {
       .number()
       .nullable()
       .describe(
-        'Depth bin CO-OPS answered with — the requested bin, or its default shallowest bin when none was requested. Null when the response carried no prediction rows.',
+        'Depth bin CO-OPS answered with — the requested bin or the default it selected. Null when CO-OPS returned no prediction rows.',
       ),
     depth: z
       .number()
@@ -155,7 +155,7 @@ export const noaaMarineGetCurrents = tool('noaa_marine_get_currents', {
       )
       .optional()
       .describe(
-        'Max flood, max ebb, and slack events — up to limit events starting at offset, and the whole matched series when it fits one page. Present for MAX_SLACK interval, and empty when CO-OPS answered with a statement instead of events — read notice for its wording.',
+        'Max flood, max ebb, and slack events from offset up to limit. Present for MAX_SLACK and when CO-OPS answers 6min with events. For MAX_SLACK, empty when CO-OPS answered with a statement — read notice for its wording.',
       ),
     predictions: z
       .array(
@@ -181,7 +181,7 @@ export const noaaMarineGetCurrents = tool('noaa_marine_get_currents', {
       )
       .optional()
       .describe(
-        '6-minute continuous current predictions — up to limit rows starting at offset, and the whole curve when it fits one page. Present for 6min interval, and empty when CO-OPS answered with a statement instead of a curve — read notice for its wording.',
+        '6-minute continuous current predictions from offset up to limit. Present for 6min, and empty when CO-OPS answered with events or a statement — read notice for details.',
       ),
   }),
 
@@ -190,7 +190,7 @@ export const noaaMarineGetCurrents = tool('noaa_marine_get_currents', {
       .string()
       .optional()
       .describe(
-        "CO-OPS's own statement about the station when it returned that instead of prediction events — the answer to report, not a failure — or what this page of the prediction series covers and how to reach the next one. Opens with the requested and applied values when limit was clamped to its cap.",
+        "CO-OPS's statement about the station, an explanation when 6min returns events, or page coverage and how to reach the next page. Opens with the requested and applied values when limit was clamped to its cap.",
       ),
     truncated: z
       .boolean()
@@ -210,7 +210,7 @@ export const noaaMarineGetCurrents = tool('noaa_marine_get_currents', {
       .int()
       .optional()
       .describe(
-        'Prediction rows this page carries — the length of events on the MAX_SLACK interval, of predictions on 6min. Absent when the whole matched series was returned.',
+        'Rows this page carries in the returned events or predictions series. Absent when the whole matched series was returned.',
       ),
     page_offset: z
       .number()
@@ -251,8 +251,9 @@ export const noaaMarineGetCurrents = tool('noaa_marine_get_currents', {
     {
       reason: 'date_range_exceeded',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'Requested date range exceeds the 1-year CO-OPS limit.',
-      recovery: 'Split the request into multiple calls each spanning at most 1 year.',
+      when: 'The request exceeds the CO-OPS date span limit for the selected interval.',
+      recovery:
+        'Split the date range into calls within the reported limit (31 days for 6min or 365 days for MAX_SLACK by default).',
     },
     {
       reason: 'no_predictions',
@@ -273,7 +274,7 @@ export const noaaMarineGetCurrents = tool('noaa_marine_get_currents', {
       code: JsonRpcErrorCode.InvalidParams,
       when: 'CO-OPS rejected the requested bin because the station publishes no predictions at that bin.',
       recovery:
-        'Read the bins[] array on the station row from noaa_marine_find_stations and retry with one of those bin numbers, or omit bin to take the shallowest.',
+        'Read bins[] on the station row from noaa_marine_find_stations and retry with one of those bin numbers, or omit bin to let CO-OPS choose its default.',
     },
     {
       reason: 'upstream_throttled',
@@ -293,10 +294,12 @@ export const noaaMarineGetCurrents = tool('noaa_marine_get_currents', {
     if (!range.ok) {
       throw ctx.fail('invalid_date_range', range.error);
     }
-    if (range.spanDays > 365) {
+    const maxDays = input.interval === '6min' ? 31 : 365;
+    if (range.spanDays > maxDays) {
       throw ctx.fail(
         'date_range_exceeded',
-        `Date range of ${Math.ceil(range.spanDays)} days exceeds the 1-year limit.`,
+        `Date range of ${range.spanDays} days exceeds the CO-OPS limit of ${maxDays} days for ${input.interval}.`,
+        { max_days: maxDays },
       );
     }
 
@@ -329,6 +332,16 @@ export const noaaMarineGetCurrents = tool('noaa_marine_get_currents', {
       const err = predResult.reason;
       // CO-OPS body-level errors carry a typed coopsReason — map to contract reasons.
       if (isCoopsBodyError(err)) {
+        if (err.coopsReason === 'date_range_exceeded') {
+          const limit = err.maxDays;
+          throw ctx.fail(
+            'date_range_exceeded',
+            limit === undefined
+              ? `CO-OPS rejected the date span for ${input.interval} as too long.`
+              : `CO-OPS rejected the date span for ${input.interval} and reported a limit of ${limit} days.`,
+            limit === undefined ? undefined : { max_days: limit },
+          );
+        }
         if (err.coopsReason === 'bin_unavailable') {
           const bins = err.availableBins;
           throw ctx.fail(
@@ -338,7 +351,7 @@ export const noaaMarineGetCurrents = tool('noaa_marine_get_currents', {
               ? {
                   available_bins: bins,
                   recovery: {
-                    hint: `Station ${input.station_id} publishes bins ${bins.join(', ')} — retry with one of those, or omit bin to take the shallowest.`,
+                    hint: `Station ${input.station_id} publishes bins ${bins.join(', ')} — retry with one of those, or omit bin to let CO-OPS choose its default.`,
                   },
                 }
               : undefined,
@@ -388,8 +401,8 @@ export const noaaMarineGetCurrents = tool('noaa_marine_get_currents', {
     // `ctx.enrich.notice` keeps only its last call, so a clamp and whatever this response says
     // after it go out as one notice, the clamp first — even on a page that holds the whole range.
     const limit = clampLimit('noaa_marine_get_currents', input.limit, ctx);
-    const notify = (detail?: string) => {
-      const notice = [limit.notice, detail].filter(Boolean).join(' ');
+    const notify = (...details: (string | undefined)[]) => {
+      const notice = [limit.notice, ...details].filter(Boolean).join(' ');
       if (notice) ctx.enrich.notice(notice);
     };
 
@@ -410,8 +423,8 @@ export const noaaMarineGetCurrents = tool('noaa_marine_get_currents', {
         : { ...empty, predictions: [] };
     }
 
-    if (input.interval === 'MAX_SLACK') {
-      const raw = result.events ?? [];
+    if (result.events !== undefined) {
+      const raw = result.events;
       if (raw.length === 0) {
         throw ctx.fail(
           'no_predictions',
@@ -448,7 +461,13 @@ export const noaaMarineGetCurrents = tool('noaa_marine_get_currents', {
       // is a page that says what it left behind.
       const page = pageRows(events, { limit: limit.applied, offset: input.offset });
       if (!page.whole) ctx.enrich(pageDisclosure(page));
-      notify(page.whole ? undefined : pageNotice(page, 'events'));
+      const echo = binEcho(raw);
+      const fallback = input.interval === '6min';
+      const binLabel = echo.bin === null ? 'the selected bin' : `bin ${echo.bin}`;
+      const fallbackNotice = fallback
+        ? `CO-OPS returned max/slack events because ${binLabel} has no 6-minute curve.`
+        : undefined;
+      notify(fallbackNotice, page.whole ? undefined : pageNotice(page, 'events'));
 
       ctx.log.info('Current predictions (MAX_SLACK) fetched', {
         station_id: input.station_id,
@@ -456,7 +475,7 @@ export const noaaMarineGetCurrents = tool('noaa_marine_get_currents', {
         matched: page.matched,
       });
 
-      return { ...identity, ...binEcho(raw), events: page.rows };
+      return { ...identity, ...echo, events: page.rows, ...(fallback ? { predictions: [] } : {}) };
     }
 
     // 6-min interval

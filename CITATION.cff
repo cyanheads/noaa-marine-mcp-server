@@ -1,7 +1,7 @@
 cff-version: 1.2.0
 message: "If you use this software, please cite it as below."
 title: noaa-marine-mcp-server
-abstract: "Find NOAA tide stations and NDBC buoys, fetch tide predictions, water levels, tidal currents, and live buoy conditions via MCP. STDIO or Streamable HTTP."
+abstract: "Find NOAA tide stations and NDBC buoys, fetch tide predictions, water levels, tidal currents, and latest buoy observations via MCP. STDIO or Streamable HTTP."
 type: software
 authors:
   - family-names: Hand

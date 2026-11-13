@@ -140,15 +140,15 @@ interface CoopsCurrentRowCommon {
   Velocity_Major?: number;
 }
 
-/** A current prediction row (MAX_SLACK interval). */
+/** A max/slack event row, including when a subordinate bin answers a 6-minute request. */
 export interface CoopsCurrentRow extends CoopsCurrentRowCommon {
   /** Event type: flood, ebb, slack */
   Type: string;
 }
 
 /**
- * A current prediction row (6-min interval). CO-OPS sends no `Direction` key on this
- * interval — the flow sense is the sign of `Velocity_Major`, and the bearing it implies
+ * A 6-minute current prediction row. CO-OPS sends neither `Type` nor `Direction` on these
+ * rows — the flow sense is the sign of `Velocity_Major`, and the bearing it implies
  * is the station's `meanFloodDir` or `meanEbbDir`.
  */
 export type CoopsCurrent6MinRow = CoopsCurrentRowCommon;

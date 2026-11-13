@@ -13,6 +13,7 @@ import {
   isCoopsBodyError,
   isCoopsThrottled,
   noGaugeHint,
+  retiredGaugeHint,
 } from '@/services/coops/coops-service.js';
 import {
   awaitsVerification,
@@ -38,6 +39,12 @@ function highLowClass(ty: string | undefined): (typeof HIGH_LOW_CLASSES)[number]
   const trimmed = ty?.trim();
   return HIGH_LOW_CLASSES.find((value) => value === trimmed);
 }
+
+const heightAtTime = z.object({
+  time: z.string().describe('Timestamp as returned in the observation series.'),
+  value: z.number().describe('Observed height in the requested units and datum.'),
+});
+type HeightAtTime = z.infer<typeof heightAtTime>;
 
 interface WaterLevelIntervalSpec {
   /** Largest span CO-OPS accepts for the product, in days, enforced before the call. */
@@ -126,24 +133,10 @@ export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
       .regex(COOPS_DATE_FORM, 'Must be YYYYMMDD or YYYY-MM-DD, e.g. "20240601" or "2024-06-01".')
       .describe('End date (inclusive), YYYYMMDD or YYYY-MM-DD, e.g. "20240601" or "2024-06-01".'),
     datum: z
-      .enum([
-        'MLLW',
-        'MHHW',
-        'MHW',
-        'MTL',
-        'MSL',
-        'MLW',
-        'NAVD',
-        'STND',
-        'IGLD',
-        'LWD',
-        'CRD',
-        'LWI',
-        'HWI',
-      ])
+      .enum(['MLLW', 'MHHW', 'MHW', 'MTL', 'MSL', 'MLW', 'NAVD', 'STND', 'IGLD', 'LWD', 'CRD'])
       .default('MLLW')
       .describe(
-        "Datum the observed heights are referenced to. MLLW (default) is the US nautical chart datum, and MHHW (mean higher high water) is the flooding reference; MHW, MTL, MSL, and MLW are the other tidal planes. NAVD is NAVD88 and reads only where the station has an NAVD88 tie. STND is the station's own datum and is the plane that works where no tidal datum exists. IGLD and LWD apply at Great Lakes stations only, CRD at Columbia River stations only, and LWI and HWI are lunitidal intervals rather than heights. A datum this station does not carry comes back as datum_unavailable, whose hint names a datum to retry with, and a station with no water-level gauge at all as no_gauge.",
+        "Datum the observed heights are referenced to. MLLW (default) is the US nautical chart datum, and MHHW (mean higher high water) is the flooding reference; MHW, MTL, MSL, and MLW are the other tidal planes. NAVD is NAVD88 and reads only where the station has an NAVD88 tie. STND is the station's own datum and is the plane that works where no tidal datum exists. IGLD and LWD apply at Great Lakes stations only, and CRD at Columbia River stations only. LWI and HWI are lunitidal intervals available in monthly means. A datum this station does not carry comes back as datum_unavailable, whose hint names a datum to retry with, and a station with no water-level gauge at all as no_gauge.",
       ),
     time_zone: z
       .enum(['lst_ldt', 'gmt', 'lst'])
@@ -228,6 +221,14 @@ export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
       .describe(
         'Paired tide predictions covering the same period as the returned observations, at the interval matching the observed cadence. Every prediction in the page span is included and none repeats across pages, so a page whose span crosses a sensor outage carries more predictions than observations. Always empty on the daily_mean interval, which has no paired series. Otherwise empty when CO-OPS returned no predictions for this station and range, or when the prediction fetch failed — predictions_status says which.',
       ),
+    observed_extremes: z
+      .object({
+        max: heightAtTime.describe('Highest observation, using the earliest timestamp on ties.'),
+        min: heightAtTime.describe('Lowest observation, using the earliest timestamp on ties.'),
+      })
+      .describe(
+        'Highest and lowest observations at this cadence across the full matched series before paging. On daily_mean, both values are daily averages.',
+      ),
     residual_summary: z
       .object({
         max_surge: z
@@ -239,6 +240,18 @@ export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
           .number()
           .describe(
             'Maximum negative residual magnitude in the requested units (feet for english, meters for metric) — anomalous drawdown indicator. 0 when the observed level never fell below prediction in the range.',
+          ),
+        max_surge_at: z
+          .string()
+          .optional()
+          .describe(
+            'Earliest observation timestamp at the largest unrounded positive residual. Absent when no residual is positive.',
+          ),
+        max_drawdown_at: z
+          .string()
+          .optional()
+          .describe(
+            'Earliest observation timestamp at the largest unrounded drawdown. Absent when no residual is negative.',
           ),
       })
       .optional()
@@ -252,7 +265,7 @@ export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
       .string()
       .optional()
       .describe(
-        'That limit was clamped to its cap, why the paired prediction series is missing or carries no residual, how many sample slots were dropped, and what this page of the observed series covers — whichever of those apply, composed into one string in that order.',
+        'That limit was clamped to its cap, why the paired prediction series is missing or carries no residual, how many sample slots were dropped, where a recent hourly or daily mean series ends short of the requested range, and what this page covers — whichever apply, composed into one string.',
       ),
     predictions_status: z
       .enum(['empty', 'unavailable'])
@@ -329,7 +342,7 @@ export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
     {
       reason: 'no_data',
       code: JsonRpcErrorCode.NotFound,
-      when: 'Station exists but no observed water-level data for the date range — including an hourly, high_low, or daily_mean window ending before the prior month, which is not a verification lag.',
+      when: 'Station exists but has no observed water-level data for the date range, including a window wholly after gauge removal or a verified-product window ending before the prior month.',
       recovery:
         'The station may be offline, or its record may begin after the window. Try a different date range or station.',
     },
@@ -357,7 +370,7 @@ export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
     {
       reason: 'verified_data_lag',
       code: JsonRpcErrorCode.NotFound,
-      when: 'The hourly, high_low, or daily_mean product returned no rows for a window ending on or after the first day of the prior month, which CO-OPS may not have verified yet.',
+      when: 'The hourly, high_low, or daily_mean product reported no coverage for a window ending on or after the first day of the prior month, which CO-OPS may not have verified yet. A window confirmed to start after gauge removal returns no_data.',
       recovery:
         'CO-OPS verifies these products monthly, for the prior month, so request a window ending before the first day of the prior month — or use interval "6min", whose preliminary data reaches the present.',
     },
@@ -413,6 +426,19 @@ export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
     }
 
     const svc = getCoopsService();
+    const retirementNote = async (purpose: 'datum' | 'retirement') => {
+      const gauge = await svc.lookupGauge(input.station_id, ctx, purpose);
+      if (gauge.kind !== 'retired') return { gauge, note: '' };
+      const note = ` The gauge was removed on ${gauge.removedDate}.`;
+      if (range.beginDate > gauge.removedDate.replaceAll('-', '')) {
+        throw ctx.fail(
+          'no_data',
+          `Station ${input.station_id} has no observations for the requested range.${note}`,
+          { recovery: { hint: retiredGaugeHint(gauge.station) } },
+        );
+      }
+      return { gauge, note };
+    };
 
     /*
      * CO-OPS answers daily_mean at a coastal station with an HTTP 400 naming the Great Lakes
@@ -465,7 +491,7 @@ export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
          * datum. A catalog that cannot be read leaves the datum retry standing.
          */
         if (err.coopsReason === 'datum_unavailable') {
-          const gauge = await svc.lookupGauge(input.station_id, ctx);
+          const { gauge, note } = await retirementNote('datum');
           if (gauge.kind === 'no_gauge') {
             throw ctx.fail(
               'no_gauge',
@@ -473,10 +499,12 @@ export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
               { recovery: { hint: noGaugeHint(input.station_id, gauge.tideStation) } },
             );
           }
-          const greatLakes = gauge.kind === 'gauge' && gauge.station.greatlakes === true;
+          const greatLakes =
+            (gauge.kind === 'gauge' || gauge.kind === 'retired') &&
+            gauge.station?.greatlakes === true;
           throw ctx.fail(
             'datum_unavailable',
-            `Station ${input.station_id} does not carry datum ${input.datum}.`,
+            `Station ${input.station_id} does not carry datum ${input.datum}.${note}`,
             { recovery: { hint: datumRetryHint(input.station_id, input.datum, greatLakes) } },
           );
         }
@@ -492,6 +520,7 @@ export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
             `CO-OPS publishes the daily_mean water-level product at Great Lakes stations only, and rejected station ${input.station_id} as coastal.`,
           );
         }
+        const { note } = await retirementNote('retirement');
         /*
          * CO-OPS says a product "may not be offered at this station at the requested time" both
          * for a coarser-product window it has not verified yet — it verifies those monthly, for
@@ -503,12 +532,12 @@ export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
           if (awaitsVerification(range.end)) {
             throw ctx.fail(
               'verified_data_lag',
-              `CO-OPS has published no ${input.interval} data for station ${input.station_id} in the requested window.`,
+              `CO-OPS has published no ${input.interval} data for station ${input.station_id} in the requested window.${note}`,
             );
           }
           throw ctx.fail(
             'no_data',
-            `CO-OPS has no ${input.interval} data for station ${input.station_id} in a window ending ${input.end_date}. The window ends before the prior month, so it is not waiting on CO-OPS's monthly verification.`,
+            `CO-OPS has no ${input.interval} data for station ${input.station_id} in a window ending ${input.end_date}. The window ends before the prior month, so it is not waiting on CO-OPS's monthly verification.${note}`,
             {
               recovery: {
                 hint: `The station's ${input.interval} record may begin after this window, or an outage may cover it. Request a later window for station ${input.station_id}.`,
@@ -519,7 +548,7 @@ export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
         // Every other reason is an absence of observations, not a rejected request.
         throw ctx.fail(
           'no_data',
-          `No water level data for station ${input.station_id} in the requested date range.`,
+          `No water level data for station ${input.station_id} in the requested date range.${note}`,
         );
       }
       // CO-OPS HTTP 400 — invalid station ID before response body is parsed.
@@ -547,15 +576,16 @@ export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
      * `q` stays absent rather than defaulting to preliminary, which would stamp CO-OPS's
      * verified products as unverified.
      */
-    type Observation = {
+    type Observation = HeightAtTime & {
       quality?: string;
       sigma?: number;
-      time: string;
       type?: (typeof HIGH_LOW_CLASSES)[number];
-      value: number;
     };
     const observations: Observation[] = [];
     let gapsDropped = 0;
+    let lastObservedAt = '';
+    let maxObserved: HeightAtTime | undefined;
+    let minObserved: HeightAtTime | undefined;
     for (const row of rawObs) {
       const value = Number.parseFloat(row.v);
       if (!Number.isFinite(value)) {
@@ -563,6 +593,21 @@ export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
         continue;
       }
       const entry: Observation = { time: row.t, value };
+      if (row.t > lastObservedAt) lastObservedAt = row.t;
+      if (
+        !maxObserved ||
+        value > maxObserved.value ||
+        (value === maxObserved.value && row.t < maxObserved.time)
+      ) {
+        maxObserved = { time: row.t, value };
+      }
+      if (
+        !minObserved ||
+        value < minObserved.value ||
+        (value === minObserved.value && row.t < minObserved.time)
+      ) {
+        minObserved = { time: row.t, value };
+      }
       if (row.q) entry.quality = row.q;
       if (row.s) {
         const sigma = Number.parseFloat(row.s);
@@ -573,12 +618,14 @@ export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
       observations.push(entry);
     }
 
-    if (observations.length === 0) {
+    if (!maxObserved || !minObserved) {
+      const { note } = await retirementNote('retirement');
       throw ctx.fail(
         'no_data',
-        gapsDropped > 0
+        (gapsDropped > 0
           ? `Station ${input.station_id} reported no value in any of the ${gapsDropped} sample slots CO-OPS returned for the requested date range.`
-          : `No water level data for station ${input.station_id} in the requested date range.`,
+          : `No water level data for station ${input.station_id} in the requested date range.`) +
+          note,
       );
     }
 
@@ -619,7 +666,7 @@ export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
           ? 'CO-OPS is temporarily refusing requests from this server after a burst of calls, so wait a couple of minutes before retrying for the comparison series, and space successive calls.'
           : 'Retry to obtain the comparison series.';
         notices.push(
-          `The tide-prediction fetch for station ${input.station_id} failed, so no prediction series is available to compare against and no residual could be computed. The observed series is complete. ${nextStep}`,
+          `The tide-prediction fetch for station ${input.station_id} failed, so no prediction series is available to compare against and no residual could be computed. The available observations are still returned. ${nextStep}`,
         );
       } else {
         ctx.enrich({ predictions_status: 'empty' });
@@ -631,6 +678,23 @@ export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
       notices.push(
         `${gapsDropped} of the ${gapsDropped + observations.length} sample slots CO-OPS returned carried no reading and were dropped, so the ${observations.length} rows that matched the range are not continuous across it. Sensor gaps appear in preliminary data and CO-OPS fills them when the range is promoted to verified.`,
       );
+    }
+
+    if (
+      (input.interval === 'hourly' || input.interval === 'daily_mean') &&
+      awaitsVerification(range.end)
+    ) {
+      // CO-OPS already stamps rows in the effective zone. Compare local or UTC slots directly,
+      // without guessing historical DST from the station's catalog clock.
+      const endDay = range.end.toISOString().slice(0, 10);
+      const daily = input.interval === 'daily_mean';
+      const lastSlot = daily ? lastObservedAt.slice(0, 10) : lastObservedAt;
+      const expected = daily ? endDay : `${endDay} 23:00`;
+      if (lastSlot < expected) {
+        notices.push(
+          `Last available observation: ${lastSlot} (${timeZone}). Later data may still await verification. Use interval "6min" for preliminary water levels.`,
+        );
+      }
     }
 
     /*
@@ -647,20 +711,46 @@ export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
      * drawdown, and one that sat below had no surge, so the side that never occurred reads 0
      * rather than the signed residual nearest to it.
      */
-    let residualSummary: { max_surge: number; max_drawdown: number } | undefined;
+    let residualSummary:
+      | {
+          max_surge: number;
+          max_drawdown: number;
+          max_surge_at?: string;
+          max_drawdown_at?: string;
+        }
+      | undefined;
     if (spec.residual && predictions.length > 0) {
       const predMap = new Map(predictions.map((p) => [p.time, p.value]));
-      const residuals: number[] = [];
+      let matched = false;
+      let surge: HeightAtTime | undefined;
+      let drawdown: HeightAtTime | undefined;
       for (const obs of observations) {
         const pred = predMap.get(obs.time);
-        if (pred !== undefined && Number.isFinite(pred)) residuals.push(obs.value - pred);
+        if (pred === undefined || !Number.isFinite(pred)) continue;
+        const residual = obs.value - pred;
+        if (!Number.isFinite(residual)) continue;
+        matched = true;
+        if (
+          residual > 0 &&
+          (!surge || residual > surge.value || (residual === surge.value && obs.time < surge.time))
+        ) {
+          surge = { time: obs.time, value: residual };
+        }
+        if (
+          residual < 0 &&
+          (!drawdown ||
+            -residual > drawdown.value ||
+            (-residual === drawdown.value && obs.time < drawdown.time))
+        ) {
+          drawdown = { time: obs.time, value: -residual };
+        }
       }
-      if (residuals.length > 0) {
-        const maxSurge = Math.max(0, ...residuals);
-        const maxDrawdown = Math.max(0, -Math.min(...residuals));
+      if (matched) {
         residualSummary = {
-          max_surge: Math.round(maxSurge * 100) / 100,
-          max_drawdown: Math.round(maxDrawdown * 100) / 100,
+          max_surge: surge ? Math.round(surge.value * 100) / 100 : 0,
+          max_drawdown: drawdown ? Math.round(drawdown.value * 100) / 100 : 0,
+          ...(surge ? { max_surge_at: surge.time } : {}),
+          ...(drawdown ? { max_drawdown_at: drawdown.time } : {}),
         };
       }
     }
@@ -698,24 +788,28 @@ export const noaaMarineGetWaterLevel = tool('noaa_marine_get_water_level', {
       interval: input.interval,
       observations: paged.page.rows,
       predictions: paged.companion,
+      observed_extremes: { max: maxObserved, min: minObserved },
       ...(residualSummary ? { residual_summary: residualSummary } : {}),
     };
   },
 
   format: (result) => {
+    const unit = result.units === 'metric' ? 'm' : 'ft';
+    const { max, min } = result.observed_extremes;
     const lines: string[] = [
       `## Water Level — ${escapeMarkdownInline(result.station_name)} (${escapeMarkdownInline(result.station_id)})`,
       `**Datum:** ${result.datum} · **Units:** ${result.units} · **Interval:** ${result.interval}`,
+      `**Max observed:** ${max.value} ${unit} at ${escapeMarkdownInline(max.time)} · **Min observed:** ${min.value} ${unit} at ${escapeMarkdownInline(min.time)}`,
     ];
 
     if (result.residual_summary) {
-      const unitLabel = result.units === 'metric' ? 'm' : 'ft';
+      const { max_surge, max_drawdown, max_surge_at, max_drawdown_at } = result.residual_summary;
+      const surgeAt = max_surge_at ? ` at ${escapeMarkdownInline(max_surge_at)}` : '';
+      const drawdownAt = max_drawdown_at ? ` at ${escapeMarkdownInline(max_drawdown_at)}` : '';
       lines.push(
-        `**Max surge:** ${result.residual_summary.max_surge} ${unitLabel} · **Max drawdown:** ${result.residual_summary.max_drawdown} ${unitLabel}`,
+        `**Max surge:** ${max_surge} ${unit}${surgeAt} · **Max drawdown:** ${max_drawdown} ${unit}${drawdownAt}`,
       );
     }
-
-    const unit = result.units === 'metric' ? 'm' : 'ft';
 
     // Every row of the page, never a head slice: the page is already bounded, and a slice here
     // would leave a content[]-only client unable to reach the rows it omits.

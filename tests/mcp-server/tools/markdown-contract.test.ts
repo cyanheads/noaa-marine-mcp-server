@@ -19,6 +19,7 @@ const observations = {
   latitude: 44,
   longitude: -68,
   observed_at: '2026-10-24T00:00:00Z',
+  observation_age_minutes: 0,
   source: 'ndbc',
 };
 
@@ -48,6 +49,10 @@ describe('literal station names in Markdown', () => {
         noaaMarineGetWaterLevel.format!({
           ...identity,
           interval: '6min',
+          observed_extremes: {
+            max: { time: '2026-10-24 00:00', value: 1 },
+            min: { time: '2026-10-24 00:00', value: 1 },
+          },
           observations: [],
           predictions: [],
         }),

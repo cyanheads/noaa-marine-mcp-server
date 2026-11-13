@@ -76,6 +76,7 @@ const NULL_OUTPUT = {
   latitude: 47.35 as number | null,
   longitude: -124.73 as number | null,
   observed_at: '2025-01-15T12:00:00Z',
+  observation_age_minutes: 0,
   waves_observed_at: '2025-01-15T12:00:00Z' as string | null,
   source: 'ndbc',
   wind_direction_deg: null as number | null,
@@ -359,6 +360,7 @@ describe('noaaMarineGetConditions', () => {
       latitude: 47.35,
       longitude: -124.73,
       observed_at: '2025-01-15T12:00:00Z',
+      observation_age_minutes: 0,
       waves_observed_at: '2025-01-15T12:00:00Z',
       source: 'ndbc',
       wind_direction_deg: 270,
@@ -507,6 +509,7 @@ describe('noaaMarineGetConditions', () => {
   });
 
   it('leaves the wave block out of the notice — waves_observed_at already dates it', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-09-17T15:20:00Z'));
     const { getNdbcService } = await import('@/services/ndbc/ndbc-service.js');
     const svc = getNdbcService();
     vi.spyOn(svc, 'getActiveStations').mockResolvedValue([NDBC_STATION]);
@@ -525,6 +528,7 @@ describe('noaaMarineGetConditions', () => {
   });
 
   it('emits no notice when every block came from the newest row', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2025-01-15T15:00:00Z'));
     const { getNdbcService } = await import('@/services/ndbc/ndbc-service.js');
     const svc = getNdbcService();
     vi.spyOn(svc, 'getActiveStations').mockResolvedValue([NDBC_STATION]);
@@ -533,6 +537,12 @@ describe('noaaMarineGetConditions', () => {
     const result = await runToolContract(noaaMarineGetConditions, { station_id: '46041' });
 
     expect((result.structuredContent as Record<string, unknown>).notice).toBeUndefined();
+    expect(result.structuredContent).toHaveProperty('observation_age_minutes', 180);
+    const text = result.content
+      .map((block) => (block.type === 'text' ? block.text : ''))
+      .join('\n');
+    expect(text).toContain('**Observation age:** 180 minutes');
+    expect(text).not.toContain('may have stopped reporting');
   });
 
   it('does not claim a fixed ten-minute observation cadence', () => {
@@ -601,6 +611,10 @@ describe('noaaMarineGetConditions', () => {
 
     afterEach(() => {
       vi.unstubAllGlobals();
+    });
+
+    beforeEach(() => {
+      vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-10-29T15:25:00Z'));
     });
 
     it('makes the same two requests as before on the hit path, with no resolution fields', async () => {
@@ -760,6 +774,7 @@ describe('noaaMarineGetConditions', () => {
     });
 
     it('joins the resolution and stale-block sentences into one notice', async () => {
+      vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-10-29T18:18:01Z'));
       routeNdbc({
         [CATALOG_URL]: CATALOG,
         [realtimeUrl('8654467')]: 404,
@@ -777,6 +792,15 @@ describe('noaaMarineGetConditions', () => {
       );
       expect(textOf(result)).toContain('CO-OPS station 8654467 read through its NDBC relay HCGN7.');
       expect(textOf(result)).toContain('2026-10-29T15:12:00Z');
+      expect(result.structuredContent).toMatchObject({
+        observation_age_minutes: 180,
+        observed_at: '2026-10-29T15:18:00Z',
+        wind_speed_ms: 7.2,
+      });
+      expect(notice).toContain('may have stopped reporting');
+      expect(notice).toContain('types=["met"]');
+      expect(textOf(result)).toContain('**Observation age:** 180 minutes');
+      expect(textOf(result)).toContain(notice);
     });
   });
 

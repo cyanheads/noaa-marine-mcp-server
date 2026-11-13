@@ -10,13 +10,15 @@ import { createFetchMock, type FetchMockHarness } from '@cyanheads/mcp-ts-core/t
 const COOPS_ORIGIN = 'https://api.tidesandcurrents.noaa.gov';
 
 /** Which CO-OPS endpoint a request reached. */
-export type CoopsEndpoint = 'catalog' | 'data';
+export type CoopsEndpoint = 'catalog' | 'data' | 'details';
 
 /** Classifies a request by origin and path; undefined for anything that is not CO-OPS. */
 export function coopsEndpoint(url: string): CoopsEndpoint | undefined {
   const parsed = new URL(url);
   if (parsed.origin !== COOPS_ORIGIN) return undefined;
   if (parsed.pathname === '/mdapi/prod/webapi/stations.json') return 'catalog';
+  if (/^\/mdapi\/prod\/webapi\/stations\/[^/]+\/details\.json$/.test(parsed.pathname))
+    return 'details';
   if (parsed.pathname === '/api/prod/datagetter') return 'data';
   return undefined;
 }

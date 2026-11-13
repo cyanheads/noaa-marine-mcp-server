@@ -610,7 +610,86 @@ describe('noaa_marine_get_monthly_means', () => {
     });
   });
 
+  it.each([
+    [
+      '20260905',
+      [
+        [2026, 7],
+        [2026, 8],
+        [2026, 10],
+      ],
+      true,
+    ],
+    [
+      '20260905',
+      [
+        [2026, 7],
+        [2026, 8],
+        [2026, 9],
+        [2026, 10],
+      ],
+      false,
+    ],
+    ['20250731', [[2025, 6]], false],
+  ] as const)(
+    'checks monthly coverage through %s after filtering overruns',
+    async (end, bins, partial) => {
+      const rows = bins.map(([year, month]) => coastalRow(year, month));
+      fake(monthlyCoops(rows));
+      const result = await runToolContract(noaaMarineGetMonthlyMeans, {
+        station_id: '9447130',
+        begin_date: '20250601',
+        end_date: end,
+        limit: 1,
+        offset: 4,
+      });
+      expect(result.structuredContent).toMatchObject({ months: [] });
+      const { notice } = result.structuredContent as Structured;
+      if (partial) {
+        expect(notice).toContain(
+          'Last available month: 2026-08. Later data may still await verification.',
+        );
+        expect(textOf(result)).toContain('Last available month: 2026-08.');
+      } else {
+        expect(notice).not.toContain('await verification');
+        expect(textOf(result)).not.toContain('await verification');
+      }
+    },
+  );
+
   describe('upstream failures', () => {
+    it.each([
+      ['20260101', 'no_data'],
+      ['19950531', 'datum_unavailable'],
+      ['19740601', 'datum_unavailable'],
+    ])('uses retirement and the first requested month for %s', async (begin_date, reason) => {
+      const station = { id: '9448794', name: 'Anacortes', lat: 48.51, lng: -122.61 };
+      const upstream = fake((endpoint, url) => {
+        if (endpoint === 'details')
+          return Response.json({ id: station.id, removed: '1995-05-17 23:00:00' });
+        if (endpoint === 'catalog') {
+          return Response.json({
+            stations: url.searchParams.get('type') === 'historicwl' ? [station] : [],
+          });
+        }
+        return coopsError('There is no MLLW for the station: 9448794', 400)(endpoint, url);
+      });
+      const result = await runToolContract(noaaMarineGetMonthlyMeans, {
+        station_id: station.id,
+        begin_date,
+        end_date: begin_date,
+      });
+      expect(errorOf(result).data?.reason).toBe(reason);
+      expect(errorOf(result).message).toContain('1995-05-17');
+      expect(textOf(result)).toContain('1995-05-17');
+      expect(callsTo(upstream, 'details')).toHaveLength(1);
+      if (reason === 'no_data') {
+        expect(hintOf(result)).toContain('latitude 48.51, longitude -122.61');
+        expect(hintOf(result)).toContain('types=["water_level"]');
+      } else {
+        expect(hintOf(result)).toContain('Retry with datum STND');
+      }
+    });
     it('maps the CO-OPS invalid-station 400 to station_not_found', async () => {
       // The body CO-OPS sends, leading space included.
       fake(coopsError(' The station is not a valid station or there is system error.', 400));
@@ -753,7 +832,7 @@ describe('noaa_marine_get_monthly_means', () => {
     });
 
     it('applies the same window rule when CO-OPS returns only the overrun month', async () => {
-      fake(monthlyCoops([coastalRow(2026, 10)]));
+      fake(withCatalogs(monthlyCoops([coastalRow(2026, 10)]), { waterlevels: [SEATTLE_GAUGE] }));
       const lag = await runToolContract(noaaMarineGetMonthlyMeans, {
         station_id: '9447130',
         begin_date: '20260901',
@@ -762,7 +841,7 @@ describe('noaa_marine_get_monthly_means', () => {
       expectFailure(lag, JsonRpcErrorCode.NotFound, 'verified_data_lag');
 
       http?.restore();
-      fake(monthlyCoops([]));
+      fake(withCatalogs(monthlyCoops([]), { waterlevels: [SEATTLE_GAUGE] }));
       const early = await runToolContract(noaaMarineGetMonthlyMeans, {
         station_id: '9447130',
         begin_date: '19000101',

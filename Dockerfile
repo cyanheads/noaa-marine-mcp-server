@@ -129,7 +129,7 @@ ENV NODE_ENV=production
 # OCI image metadata (https://github.com/opencontainers/image-spec/blob/main/annotations.md)
 ARG APP_VERSION
 LABEL org.opencontainers.image.title="noaa-marine-mcp-server"
-LABEL org.opencontainers.image.description="Find NOAA tide stations and NDBC buoys, fetch tide predictions, water levels, tidal currents, and live buoy conditions via MCP. STDIO or Streamable HTTP."
+LABEL org.opencontainers.image.description="Find NOAA tide stations and NDBC buoys, fetch tide predictions, water levels, tidal currents, and latest buoy observations via MCP. STDIO or Streamable HTTP."
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 LABEL org.opencontainers.image.version="${APP_VERSION}"
 LABEL org.opencontainers.image.source="https://github.com/cyanheads/noaa-marine-mcp-server"

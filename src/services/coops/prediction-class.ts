@@ -10,9 +10,8 @@
  * answer — a subordinate tide station publishes high and low events only, with no
  * 6-minute curve — so it is decoded once here and read identically everywhere.
  *
- * `subordinate` occurs in both catalogs and does not mean the same thing in each: a
- * subordinate tide station has no 6-minute curve, while a subordinate current station
- * serves the normal MAX_SLACK series.
+ * Subordinate tide stations publish only high and low events. Subordinate current bins
+ * publish max/slack events, including when the request asks for a 6-minute curve.
  */
 
 /** The prediction classes CO-OPS publishes, as words rather than catalog letters. */
