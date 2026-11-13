@@ -3,8 +3,6 @@
  * `scripts/clean-mcpb.ts` (the strip step) and `scripts/lint-packaging.ts` (the
  * post-bundle check): runtime `skills/` modules deep inside a package survive,
  * agent-doc trees at a package root are stripped, and the two copies agree.
- * The scripts load through a run-time URL import so `tsc` does not follow them
- * into `lint-packaging.ts`'s repository-only fallback import.
  * @module tests/scripts/bundle-agent-docs.test
  */
 
@@ -45,6 +43,8 @@ const AGENT_DOC_ENTRIES = [
   'node_modules/outer/node_modules/@scope/inner/.claude/commands/run.md',
   'node_modules/@outer/pkg/node_modules/inner/framework-skills/setup/SKILL.md',
   'node_modules/some-pkg/docs/SKILL.md',
+  'node_modules/some-pkg/AGENTS.md',
+  'node_modules/outer/node_modules/@scope/inner/CLAUDE.md',
 ];
 
 let clean: CleanMcpbModule;
